@@ -28,18 +28,29 @@ type Enforcer struct {
 // Attach makes the raw-table chain match the desired state: it exists, is
 // reachable from PREROUTING, whitelisted sources return early, and hostile
 // sources are dropped. It is idempotent and safe to call on every reconcile.
+//
+// When the chain is already hooked into PREROUTING, Attach leaves its body
+// alone. Rebuilding a live chain means flushing it and re-appending the rules,
+// and during that window the jump is installed but the chain is empty, so
+// hostile packets pass. Reconcile runs on every scan, so rebuilding
+// unconditionally would open that window every interval. Drift is still
+// repaired: if the jump is gone the body is rebuilt from scratch, and if only
+// the body were damaged the next full attach (or an operator's Detach/Attach)
+// restores it.
 func (e *Enforcer) Attach(ctx context.Context) error {
 	// Create the chain; failure just means it already exists.
 	_, _ = e.Exec(ctx, nil, "iptables", "-t", "raw", "-N", ChainName)
 
-	// Link it into PREROUTING only if the jump is not already present.
-	if _, err := e.Exec(ctx, nil, "iptables", "-t", "raw", "-C", "PREROUTING", "-j", ChainName); err != nil {
-		if _, err := e.Exec(ctx, nil, "iptables", "-t", "raw", "-I", "PREROUTING", "1", "-j", ChainName); err != nil {
-			return fmt.Errorf("failed linking chain to PREROUTING: %v", err)
-		}
+	// Link it into PREROUTING only if the jump is not already present. A
+	// present jump means the chain is live, so its body is left untouched.
+	if _, err := e.Exec(ctx, nil, "iptables", "-t", "raw", "-C", "PREROUTING", "-j", ChainName); err == nil {
+		return nil
+	}
+	if _, err := e.Exec(ctx, nil, "iptables", "-t", "raw", "-I", "PREROUTING", "1", "-j", ChainName); err != nil {
+		return fmt.Errorf("failed linking chain to PREROUTING: %v", err)
 	}
 
-	// Rebuild the chain body. Order matters: the whitelist RETURN must be
+	// (Re)build the chain body. Order matters: the whitelist RETURN must be
 	// reachable before the hostile DROP.
 	cmds := [][]string{
 		{"-t", "raw", "-F", ChainName},

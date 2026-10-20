@@ -74,6 +74,24 @@ func TestAdminPostEnforcementToggles(t *testing.T) {
 	isAttached(t, rec.Body.String(), false)
 }
 
+// A toggle against a Server with no controller cannot do anything; reporting
+// success would tell an operator their firewall changed when it did not.
+func TestAdminPostEnforcementWithoutControllerFails(t *testing.T) {
+	s := &api.Server{
+		Metrics: metrics.New(),
+		IPSet: &ipset.Manager{HostileSetName: "h", WhitelistSetName: "w", Exec: func(ctx context.Context, stdin io.Reader, name string, args ...string) (string, error) {
+			return "", nil
+		}},
+		Port:      "0",
+		AdminPort: "0",
+	}
+	rec := httptest.NewRecorder()
+	s.AdminHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/enforcement?enabled=true", nil))
+	if rec.Code != http.StatusInternalServerError && rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("a no-op toggle must not report success, got %d %q", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAdminPostEnforcementRejectsBadValue(t *testing.T) {
 	s, ctl := adminServer(false)
 	rec := httptest.NewRecorder()

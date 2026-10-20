@@ -31,6 +31,9 @@ func (f *fakeAdapter) Fetch(ctx context.Context, client *http.Client) ([]string,
 
 type kernelCall struct{ stdin, raw string }
 
+// errKernel stands in for a failing `iptables`/`ipset` invocation.
+var errKernel = errors.New("exit status 1")
+
 func countingExec(calls *[]kernelCall, err error) runner.RunnerFn {
 	return func(ctx context.Context, stdin io.Reader, name string, args ...string) (string, error) {
 		body := ""
@@ -49,6 +52,33 @@ func callArgs(calls []kernelCall) []string {
 		out = append(out, c.raw)
 	}
 	return out
+}
+
+// countingExecWithKernel is countingExec with a PREROUTING state machine, so
+// `iptables -C PREROUTING` answers like a real kernel instead of always
+// succeeding. Use it for tests about attach/detach transitions.
+func countingExecWithKernel(calls *[]kernelCall, err error) runner.RunnerFn {
+	jumpPresent := false
+	return func(ctx context.Context, stdin io.Reader, name string, args ...string) (string, error) {
+		body := ""
+		if stdin != nil {
+			b, _ := io.ReadAll(stdin)
+			body = string(b)
+		}
+		line := strings.Join(args, " ")
+		*calls = append(*calls, kernelCall{stdin: body, raw: name + " " + line})
+
+		if strings.Contains(line, "-t raw -C PREROUTING -j K3S_THREAT_FILTER") && !jumpPresent {
+			return "no such rule", errKernel
+		}
+		if strings.Contains(line, "-t raw -I PREROUTING") {
+			jumpPresent = true
+		}
+		if strings.Contains(line, "-t raw -D PREROUTING") {
+			jumpPresent = false
+		}
+		return "", err
+	}
 }
 
 func newEngine(m *metrics.Metrics, entries []string, exec runner.RunnerFn) *engine.Engine {
@@ -128,19 +158,24 @@ func TestScanAndReconcileSkipsKernelOnUnchangedFingerprint(t *testing.T) {
 	if !sawIpsetRestore {
 		t.Fatalf("first scan must sync the ipsets, got calls:\n%s", joined)
 	}
-	if strings.Contains(joined, "-A K3S_THREAT_FILTER") {
-		t.Fatalf("enforcement is disabled, so no rules may be installed, got:\n%s", joined)
+	// Disabled means nothing attaches: no chain creation, no jump insert, no
+	// rules appended. Checking only -A would miss a chain created empty.
+	for _, forbidden := range []string{"-N K3S_THREAT_FILTER", "-A K3S_THREAT_FILTER"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("enforcement is disabled, so %q must not happen, got:\n%s", forbidden, joined)
+		}
+	}
+	if strings.Contains(joined, "-I PREROUTING") {
+		t.Fatalf("disabled enforcement must not hook PREROUTING, got:\n%s", joined)
 	}
 
 	calls = nil
 	e.ScanAndReconcile(context.Background()) // second scan: identical hash
-	if len(calls) != 0 {
-		// Enforcement is still reconciled every scan, so with it disabled the
-		// second scan issues only the Detach teardown — never an ipset sync.
-		for _, c := range calls {
-			if c.raw == "ipset restore" {
-				t.Fatalf("unchanged fingerprint must not re-sync ipsets, got %q", c.raw)
-			}
+	// Enforcement is still reconciled every scan, so with it disabled the
+	// second scan issues only the Detach teardown — never an ipset sync.
+	for _, c := range calls {
+		if c.raw == "ipset restore" {
+			t.Fatalf("unchanged fingerprint must not re-sync ipsets, got %q", c.raw)
 		}
 	}
 	if m.Snapshot().ScanSuccessTotal != 2 {
@@ -168,15 +203,20 @@ func TestScanPopulatesIpsetsButSkipsIptablesWhenDisabled(t *testing.T) {
 		t.Fatalf("ipsets must be synced even when enforcement is off; calls were %+v", calls)
 	}
 	for _, c := range calls {
-		if strings.Contains(c.raw, "-A K3S_THREAT_FILTER") {
-			t.Fatalf("disabled enforcement must not install rules, saw %q", c.raw)
+		// Detach legitimately runs -F/-X as teardown. What must never happen
+		// while disabled is attachment: creating the chain, hooking PREROUTING,
+		// or appending rules.
+		for _, forbidden := range []string{"-A K3S_THREAT_FILTER", "-N K3S_THREAT_FILTER", "-I PREROUTING"} {
+			if strings.Contains(c.raw, forbidden) {
+				t.Fatalf("disabled enforcement must not attach (saw %q in %q)", forbidden, c.raw)
+			}
 		}
 	}
 }
 
 func TestScanAttachesWhenEnforcementEnabled(t *testing.T) {
 	var calls []kernelCall
-	exec := countingExec(&calls, nil)
+	exec := countingExecWithKernel(&calls, nil)
 	e := newEngine(metrics.New(), []string{"1.2.3.4"}, exec)
 	e.Enforcement.Set(true)
 	e.ScanAndReconcile(context.Background())
@@ -187,7 +227,7 @@ func TestScanAttachesWhenEnforcementEnabled(t *testing.T) {
 
 func TestScanDetachesWhenEnforcementDisabled(t *testing.T) {
 	var calls []kernelCall
-	exec := countingExec(&calls, nil)
+	exec := countingExecWithKernel(&calls, nil)
 	e := newEngine(metrics.New(), []string{"1.2.3.4"}, exec)
 	e.Enforcement.Set(true)
 	e.ScanAndReconcile(context.Background())
@@ -197,6 +237,55 @@ func TestScanDetachesWhenEnforcementDisabled(t *testing.T) {
 	joined := strings.Join(callArgs(calls), "\n")
 	if !strings.Contains(joined, "-X K3S_THREAT_FILTER") {
 		t.Fatalf("disabling must tear down the chain even on an unchanged fingerprint, got:\n%s", joined)
+	}
+}
+
+// When enforcement is enabled and the kernel refuses to attach, the scan must
+// report the failure rather than pretending to succeed. The ipset sync is
+// deliberately skipped: the plan pins enforcement-failure as fatal for the
+// cycle so the next tick retries with the fingerprint still dirty.
+func TestScanReportsEnforcementFailure(t *testing.T) {
+	var calls []kernelCall
+	rec := &calls
+	e := newEngine(metrics.New(), []string{"1.2.3.4"}, countingExec(&calls, nil))
+	e.Enforcement = enforcement.New(&iptables.Enforcer{
+		HostileSetName: "k3s_hostile_ips", WhitelistSetName: "k3s_whitelist_ips",
+		Exec: func(ctx context.Context, stdin io.Reader, name string, args ...string) (string, error) {
+			*rec = append(*rec, kernelCall{raw: name + " " + strings.Join(args, " ")})
+			// The chain cannot be linked: this is the missing-capability case.
+			return "iptables: Permission denied", errKernel
+		},
+	}, true)
+
+	e.ScanAndReconcile(context.Background())
+
+	// The update must not be recorded, so the next scan retries.
+	if got := e.Metrics.Snapshot().UpdatesAppliedTotal; got != 0 {
+		t.Fatalf("a failed enforcement reconcile must not record an update, got %d", got)
+	}
+	if got := e.Metrics.Snapshot().ScanSuccessTotal; got != 1 {
+		t.Fatalf("the scan itself completed; want 1 success, got %d", got)
+	}
+}
+
+// Once the chain is hooked, a later enabled scan must not flush and rebuild it:
+// the flush window leaves the live chain empty, and Reconcile runs every scan.
+func TestScanDoesNotRebuildAnAlreadyAttachedChain(t *testing.T) {
+	var calls []kernelCall
+	exec := countingExecWithKernel(&calls, nil)
+	e := newEngine(metrics.New(), []string{"1.2.3.4"}, exec)
+	e.Enforcement.Set(true)
+	e.ScanAndReconcile(context.Background()) // first scan attaches
+
+	calls = nil
+	e.ScanAndReconcile(context.Background()) // second scan: however the fingerprint fares, enforcement is already on
+
+	joined := strings.Join(callArgs(calls), "\n")
+	if strings.Contains(joined, "-F K3S_THREAT_FILTER") {
+		t.Fatalf("a repeat scan must not flush the live chain, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "-t raw -C PREROUTING -j K3S_THREAT_FILTER") {
+		t.Fatalf("a repeat scan must still verify the jump is present, got:\n%s", joined)
 	}
 }
 

@@ -64,13 +64,17 @@ func main() {
 		HTTPClient:  &http.Client{Timeout: 35 * time.Second},
 	}
 
-	server := (&api.Server{
+	apiServer := &api.Server{
 		Metrics:     m,
 		IPSet:       setManager,
 		Port:        cfg.HTTPPort,
 		Enforcement: ctl,
 		AdminPort:   cfg.AdminPort,
-	}).HTTPServer()
+	}
+
+	// The public listener is the daemon's lifeline: if it cannot bind, the
+	// process is misconfigured and exits.
+	server := apiServer.HTTPServer()
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("HTTP server failure: %v", err)
@@ -80,16 +84,15 @@ func main() {
 	// The admin listener is a separate, loopback-bound server. Keeping it off
 	// the public listener is the whole access-control story: the toggle is
 	// reachable only from the host/pod itself.
-	adminServer := (&api.Server{
-		Metrics:     m,
-		IPSet:       setManager,
-		Port:        cfg.HTTPPort,
-		Enforcement: ctl,
-		AdminPort:   cfg.AdminPort,
-	}).AdminHTTPServer()
+	//
+	// A bind failure here must NOT kill the daemon: the admin surface is the
+	// convenience path, and taking down enforcement (and the blocklist refresh)
+	// because a port was busy is the wrong blast radius. Log loudly and keep
+	// running; ENFORCEMENT_ENABLED and the per-scan reconcile still work.
+	adminServer := apiServer.AdminHTTPServer()
 	go func() {
 		if err := adminServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("admin HTTP server failure: %v", err)
+			log.Printf("[Admin Warning] admin listener on %s failed: %v — runtime toggling is unavailable until restart", adminServer.Addr, err)
 		}
 	}()
 

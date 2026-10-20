@@ -98,12 +98,18 @@ func (s *Server) handleEnforcement(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(`{"error":"enabled parameter must be true or false"}`))
 			return
 		}
-		if s.Enforcement != nil {
-			if err := s.Enforcement.SetAndReconcile(r.Context(), enabled); err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
-				return
-			}
+		if s.Enforcement == nil {
+			// A Server without a controller cannot change anything. Reporting
+			// success here would tell an operator their firewall changed when
+			// nothing happened, so refuse instead.
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"enforcement is not configured on this server"}`))
+			return
+		}
+		if err := s.Enforcement.SetAndReconcile(r.Context(), enabled); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
 		}
 		log.Printf("[Enforcement] toggled via admin API: enabled=%v", enabled)
 		json.NewEncoder(w).Encode(map[string]interface{}{

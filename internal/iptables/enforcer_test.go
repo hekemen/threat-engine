@@ -67,6 +67,31 @@ func TestEnsureChainExactSequence(t *testing.T) {
 	}
 }
 
+func TestAttachDoesNotFlushWhenAlreadyAttached(t *testing.T) {
+	// The jump is present (scriptedExec default: everything succeeds), which
+	// means the chain is already installed. Rebuilding it would create a
+	// window in which the live chain is empty and hostile packets pass, and
+	// that window would recur on every scan. Attach must be a no-op then.
+	var calls []call
+	e := &iptables.Enforcer{
+		HostileSetName: "k3s_hostile_ips", WhitelistSetName: "k3s_whitelist_ips",
+		Exec: scriptedExec(&calls, nil),
+	}
+	if err := e.Attach(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	joined := strings.Join(callLines(calls), "\n")
+	for _, forbidden := range []string{"-F K3S_THREAT_FILTER", "-A K3S_THREAT_FILTER"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("Attach must not rebuild an already-attached chain (saw %q):\n%s", forbidden, joined)
+		}
+	}
+	// It must still have confirmed the jump is present.
+	if !strings.Contains(joined, "-t raw -C PREROUTING -j K3S_THREAT_FILTER") {
+		t.Fatalf("Attach must probe the jump even when nothing needs doing:\n%s", joined)
+	}
+}
+
 func TestEnsureChainSkipsInsertWhenJumpExists(t *testing.T) {
 	var calls []call
 	e := &iptables.Enforcer{
@@ -103,6 +128,8 @@ func TestEnsureChainRuleErrorFatal(t *testing.T) {
 	e := &iptables.Enforcer{
 		HostileSetName: "h", WhitelistSetName: "w",
 		Exec: scriptedExec(&calls, map[string]bool{
+			// The jump must be missing for the body to be rebuilt at all.
+			"-t raw -C PREROUTING -j K3S_THREAT_FILTER":                      true,
 			"-t raw -A K3S_THREAT_FILTER -m set --match-set w src -j RETURN": true,
 		}),
 	}

@@ -2,6 +2,7 @@ package enforcement_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -11,16 +12,33 @@ import (
 	"github.com/hekemen/thread-engine/internal/iptables"
 )
 
+var errNotAttached = errors.New("exit status 1")
+
 type recorder struct {
 	mu    sync.Mutex
 	calls []string
+	// jumpPresent models the kernel's PREROUTING state. It starts false (a
+	// fresh host) and flips true once an -I installs the jump, so `-C` behaves
+	// the way iptables does.
+	jumpPresent bool
 }
 
 func (r *recorder) exec(ctx context.Context, stdin io.Reader, name string, args ...string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.calls = append(r.calls, strings.Join(args, " "))
-	return "", nil // succeeds ⇒ -C reports "present", -N is harmless
+	line := strings.Join(args, " ")
+	r.calls = append(r.calls, line)
+
+	if strings.Contains(line, "-t raw -C PREROUTING -j K3S_THREAT_FILTER") && !r.jumpPresent {
+		return "no such rule", errNotAttached
+	}
+	if strings.Contains(line, "-t raw -I PREROUTING") {
+		r.jumpPresent = true
+	}
+	if strings.Contains(line, "-t raw -D PREROUTING") {
+		r.jumpPresent = false
+	}
+	return "", nil
 }
 
 func (r *recorder) joined() string {

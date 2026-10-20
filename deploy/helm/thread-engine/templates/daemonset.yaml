@@ -71,7 +71,9 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.http.port }}
-              hostPort: {{ .Values.http.port }}
+              # No hostPort: hostNetwork already binds this on the node, and a
+              # hostPort here would only add a scheduling conflict if another
+              # node process used the same port.
               protocol: TCP
             - name: admin
               containerPort: {{ .Values.admin.port }}
