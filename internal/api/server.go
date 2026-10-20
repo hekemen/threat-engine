@@ -7,11 +7,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/netip"
 	"strings"
 	"time"
 
+	"github.com/hekemen/thread-engine/internal/enforcement"
 	"github.com/hekemen/thread-engine/internal/ipset"
 	"github.com/hekemen/thread-engine/internal/metrics"
 )
@@ -21,6 +23,18 @@ type Server struct {
 	Metrics *metrics.Metrics
 	IPSet   *ipset.Manager
 	Port    string
+	// Enforcement gates whether the kernel drop rules are attached. A nil
+	// controller means enforcement is not configured, which reads as disabled.
+	Enforcement *enforcement.Controller
+	// AdminPort is the loopback-only admin listener's port.
+	AdminPort string
+}
+
+// enforcementEnabled reports the current enforcement state. A nil controller
+// (Server built without one) means enforcement is not configured, which reads
+// the same as disabled.
+func (s *Server) enforcementEnabled() bool {
+	return s.Enforcement != nil && s.Enforcement.Enabled()
 }
 
 // Handler builds the routing table.
@@ -37,6 +51,68 @@ func (s *Server) Handler() http.Handler {
 // HTTPServer wraps Handler in a server listening on the configured port.
 func (s *Server) HTTPServer() *http.Server {
 	return &http.Server{Addr: ":" + s.Port, Handler: s.Handler()}
+}
+
+// AdminHandler builds the mutating routing table. It is deliberately separate
+// from Handler: the public listener stays read-only, so the only way to change
+// enforcement is over the loopback-bound admin listener.
+func (s *Server) AdminHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/enforcement", s.handleEnforcement)
+	return mux
+}
+
+// AdminHTTPServer binds the admin surface to loopback only. Off-host callers
+// and other pods cannot reach it; on Kubernetes use kubectl port-forward or
+// kubectl exec.
+func (s *Server) AdminHTTPServer() *http.Server {
+	return &http.Server{Addr: "127.0.0.1:" + s.AdminPort, Handler: s.AdminHandler()}
+}
+
+// parseBoolArg accepts the same spellings as the ENFORCEMENT_ENABLED env var.
+func parseBoolArg(raw string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "true", "1", "yes":
+		return true, true
+	case "false", "0", "no":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+// handleEnforcement reads or flips the enforcement flag. GET reports the
+// current state; POST applies a new one and reconciles the kernel immediately.
+func (s *Server) handleEnforcement(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	switch r.Method {
+	case http.MethodGet:
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"enforcement_enabled": s.enforcementEnabled(),
+		})
+	case http.MethodPost:
+		enabled, ok := parseBoolArg(r.URL.Query().Get("enabled"))
+		if !ok {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"enabled parameter must be true or false"}`))
+			return
+		}
+		if s.Enforcement != nil {
+			if err := s.Enforcement.SetAndReconcile(r.Context(), enabled); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+				return
+			}
+		}
+		log.Printf("[Enforcement] toggled via admin API: enabled=%v", enabled)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"enforcement_enabled": s.enforcementEnabled(),
+		})
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
 }
 
 // handleHealthz reports ready only once a first scan has completed, so
@@ -81,11 +157,12 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"ip":             addr.String(),
-		"status":         status,
-		"is_blocked":     isBlocked,
-		"is_whitelisted": isWhitelisted,
-		"timestamp":      time.Now().UTC().Format(time.RFC3339),
+		"ip":                  addr.String(),
+		"status":              status,
+		"is_blocked":          isBlocked,
+		"is_whitelisted":      isWhitelisted,
+		"enforcement_enabled": s.enforcementEnabled(),
+		"timestamp":           time.Now().UTC().Format(time.RFC3339),
 	})
 }
 
@@ -111,6 +188,14 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "# HELP threat_engine_updates_applied_total Times a change triggered an ipset swap\n")
 	fmt.Fprintf(w, "# TYPE threat_engine_updates_applied_total counter\n")
 	fmt.Fprintf(w, "threat_engine_updates_applied_total %d\n\n", snap.UpdatesAppliedTotal)
+
+	fmt.Fprintf(w, "# HELP threat_engine_enforcement_enabled Whether hostile DROP rules are attached to PREROUTING (1) or inert (0)\n")
+	fmt.Fprintf(w, "# TYPE threat_engine_enforcement_enabled gauge\n")
+	enabled := 0
+	if s.enforcementEnabled() {
+		enabled = 1
+	}
+	fmt.Fprintf(w, "threat_engine_enforcement_enabled %d\n\n", enabled)
 
 	fmt.Fprintf(w, "# HELP threat_engine_last_scan_timestamp Unix timestamp of latest scan execution\n")
 	fmt.Fprintf(w, "# TYPE threat_engine_last_scan_timestamp gauge\n")
