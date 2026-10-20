@@ -1,0 +1,18 @@
+services:
+  threat-engine:
+    build: .
+    container_name: k3s-threat-engine
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      - INTERVAL_MINUTES=5
+      - HTTP_PORT=9090
+      - WHITELIST=198.51.100.42,203.0.113.0/24,100.64.0.0/10 # Static IP, VPN subnet, Tailscale
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "15m"
+        max-file: "3"
