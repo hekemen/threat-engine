@@ -4,6 +4,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -64,7 +65,10 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := r.Context()
+	// Deliberately not r.Context(): the baseline ran `ipset test` uncancellably,
+	// and Contains maps any error to "not a member". A client that aborts
+	// mid-request would otherwise have a blocked address classified as allowed.
+	ctx := context.Background()
 	isBlocked := s.IPSet.Contains(ctx, s.IPSet.HostileSetName, addr)
 	isWhitelisted := s.IPSet.Contains(ctx, s.IPSet.WhitelistSetName, addr)
 

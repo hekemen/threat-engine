@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -107,6 +108,69 @@ func TestCheckWhitelistedBlockedAddressReportsWhitelisted(t *testing.T) {
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/check?ip=10.0.0.5", nil))
 	if !strings.Contains(rec.Body.String(), `"is_blocked":true`) || !strings.Contains(rec.Body.String(), `"status":"whitelisted"`) {
 		t.Fatalf("whitelist must win over block status: %s", rec.Body.String())
+	}
+}
+
+func TestCheckUsesUncancellableContext(t *testing.T) {
+	var ctxErr error
+	exec := func(ctx context.Context, stdin io.Reader, name string, args ...string) (string, error) {
+		ctxErr = ctx.Err() // must be nil: a cancelled lookup would misreport a blocked IP as allowed
+		if args[1] == "h" {
+			return "", nil
+		}
+		return "", errors.New("exit status 1")
+	}
+	s := &api.Server{
+		Metrics: metrics.New(),
+		IPSet:   &ipset.Manager{HostileSetName: "h", WhitelistSetName: "w", Exec: exec},
+		Port:    "0",
+	}
+	req := httptest.NewRequest(http.MethodGet, "/check?ip=1.2.3.4", nil)
+	cancelled, cancel := context.WithCancel(req.Context())
+	cancel()
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req.WithContext(cancelled))
+	if ctxErr != nil {
+		t.Fatalf("kernel lookup must not be cancellable, got ctx err %v", ctxErr)
+	}
+	if !strings.Contains(rec.Body.String(), `"status":"blocked"`) {
+		t.Fatalf("blocked address misreported: %s", rec.Body.String())
+	}
+}
+
+func TestMetricsBodyGolden(t *testing.T) {
+	m := metrics.New()
+	m.RecordScanSuccess(3)
+	m.RecordUpdate("abc", 7)
+	s := &api.Server{Metrics: m, IPSet: &ipset.Manager{}, Port: "0"}
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	want := "# HELP threat_engine_blocked_targets_total Number of hostile IPs/CIDRs currently blocked in kernel\n" +
+		"# TYPE threat_engine_blocked_targets_total gauge\n" +
+		"threat_engine_blocked_targets_total 7\n\n" +
+		"# HELP threat_engine_whitelist_entries_total Active whitelist subnets\n" +
+		"# TYPE threat_engine_whitelist_entries_total gauge\n" +
+		"threat_engine_whitelist_entries_total 3\n\n" +
+		"# HELP threat_engine_scans_total Total scheduled scan attempts\n" +
+		"# TYPE threat_engine_scans_total counter\n" +
+		"threat_engine_scans_total{status=\"success\"} 1\n" +
+		"threat_engine_scans_total{status=\"failure\"} 0\n\n" +
+		"# HELP threat_engine_updates_applied_total Times a change triggered an ipset swap\n" +
+		"# TYPE threat_engine_updates_applied_total counter\n" +
+		"threat_engine_updates_applied_total 1\n\n" +
+		"# HELP threat_engine_last_scan_timestamp Unix timestamp of latest scan execution\n" +
+		"# TYPE threat_engine_last_scan_timestamp gauge\n" +
+		"threat_engine_last_scan_timestamp " + strconv.FormatInt(m.Snapshot().LastScanUnix, 10) + "\n\n" +
+		"# HELP threat_engine_last_change_timestamp Unix timestamp when rules were last updated\n" +
+		"# TYPE threat_engine_last_change_timestamp gauge\n" +
+		"threat_engine_last_change_timestamp " + strconv.FormatInt(m.Snapshot().LastChangeUnix, 10) + "\n"
+
+	if rec.Body.String() != want {
+		t.Fatalf("/metrics body drift:\ngot:\n%s\nwant:\n%s", rec.Body.String(), want)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/plain; version=0.0.4; charset=utf-8" {
+		t.Fatalf("Content-Type = %q", ct)
 	}
 }
 

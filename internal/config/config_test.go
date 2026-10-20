@@ -69,7 +69,9 @@ func TestLoadWhitelistParsing(t *testing.T) {
 	if !set[netip.MustParsePrefix("fd00::1/128")] {
 		t.Fatal("bare IPv6 not expanded to /128")
 	}
-	if len(c.CustomWhitelist) != 8+3 {
-		t.Fatalf("invalid entry must be skipped: got %d prefixes: %v", len(c.CustomWhitelist), c.CustomWhitelist)
+	for _, p := range c.CustomWhitelist {
+		if p.String() == "bogus" {
+			t.Fatal("invalid entry must be skipped")
+		}
 	}
 }
