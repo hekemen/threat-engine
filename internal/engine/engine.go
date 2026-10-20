@@ -73,6 +73,7 @@ func (e *Engine) Aggregate(ctx context.Context) ([]string, error) {
 	close(resultsChan)
 
 	uniqueEntries := make(map[string]struct{})
+	var skippedIPv6 int
 	for batch := range resultsChan {
 		for _, raw := range batch {
 			raw = strings.TrimSpace(raw)
@@ -80,21 +81,40 @@ func (e *Engine) Aggregate(ctx context.Context) ([]string, error) {
 				continue
 			}
 
-			// Validate CIDR or Single IP
+			// Validate CIDR or Single IP. IPv6 is dropped here rather than at
+			// the kernel: the sets are `family inet` and enforcement is IPv4
+			// iptables only, so a v6 member would abort the whole restore.
 			if strings.Contains(raw, "/") {
 				prefix, err := netip.ParsePrefix(raw)
-				if err != nil || e.IsWhitelisted(prefix.Addr()) {
+				if err != nil {
+					continue
+				}
+				if !prefix.Addr().Is4() {
+					skippedIPv6++
+					continue
+				}
+				if e.IsWhitelisted(prefix.Addr()) {
 					continue
 				}
 				uniqueEntries[prefix.String()] = struct{}{}
 			} else {
 				addr, err := netip.ParseAddr(raw)
-				if err != nil || e.IsWhitelisted(addr) {
+				if err != nil {
+					continue
+				}
+				if !addr.Is4() {
+					skippedIPv6++
+					continue
+				}
+				if e.IsWhitelisted(addr) {
 					continue
 				}
 				uniqueEntries[addr.String()] = struct{}{}
 			}
 		}
+	}
+	if skippedIPv6 > 0 {
+		log.Printf("[Scanner] Ignored %d IPv6 target(s): enforcement is IPv4-only", skippedIPv6)
 	}
 
 	sorted := make([]string, 0, len(uniqueEntries))

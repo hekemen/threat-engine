@@ -175,6 +175,17 @@ All settings are environment variables.
 RFC 1918 private ranges, link-local, and loopback addresses are always excluded
 and can never reach the hostile set.
 
+### IPv4 only
+
+Enforcement is **IPv4-only**. The `ipset` tables are created with
+`family inet`, the `iptables` rules live in the `raw` table (not `ip6tables`),
+and IPv6 targets from the feeds are filtered out during aggregation with a
+logged count (`Ignored N IPv6 target(s)`). This is deliberate, not an
+oversight: a `hash:net` set with no family defaults to IPv4, and adding an
+IPv6 member aborts the entire `ipset restore` transaction, so a single IPv6
+feed entry would otherwise leave the blocklist empty. Adding IPv6 enforcement
+means a parallel `family inet6` set plus an `ip6tables` chain.
+
 ### Threat feeds
 
 Fingerprint (SHA-256) over the deduplicated, sorted, whitelist-filtered set.
@@ -288,6 +299,21 @@ go build -o threat-engine ./cmd
 
 `os/exec` is confined to `internal/runner`; every other package takes an
 injectable runner so the pipeline is testable without root or kernel access.
+
+### Validating ipset commands in a container
+
+The unit tests assert the *text* of the generated restore script. Only a real
+`ipset` can confirm the kernel accepts it, so there is a harness that applies
+the real script inside a privileged container:
+
+```bash
+tests/ipset_container_test.sh
+```
+
+It generates the script from the actual `Manager.Sync`, applies it with a real
+`ipset`, checks the set's family and membership, and then deliberately
+reproduces the pre-fix form to prove the harness can still detect the bug. Run
+it after any change to `internal/ipset` or `internal/config`'s whitelist.
 
 ## License
 

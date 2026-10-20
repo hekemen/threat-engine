@@ -25,10 +25,17 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatalf("port/interval wrong: %+v", c)
 	}
 	set := prefixSet(c.CustomWhitelist)
-	for _, want := range []string{"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "::1/128", "fc00::/7", "fe80::/10"} {
+	for _, want := range []string{"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"} {
 		p := netip.MustParsePrefix(want)
 		if !set[p] {
 			t.Fatalf("default whitelist missing %s: %v", want, c.CustomWhitelist)
+		}
+	}
+	// IPv6 must not appear: the ipset tables are family inet, so a v6 member
+	// aborts the restore with "128 is out of range 0-32".
+	for _, p := range c.CustomWhitelist {
+		if !p.Addr().Is4() {
+			t.Fatalf("default whitelist must be IPv4-only, found %s", p)
 		}
 	}
 }
@@ -106,12 +113,17 @@ func TestLoadWhitelistParsing(t *testing.T) {
 	if !set[netip.MustParsePrefix("198.51.100.0/24")] {
 		t.Fatal("CIDR not parsed")
 	}
-	if !set[netip.MustParsePrefix("fd00::1/128")] {
-		t.Fatal("bare IPv6 not expanded to /128")
+	// IPv6 entries are rejected outright: they cannot be represented in a
+	// family inet set and would abort the restore transaction.
+	if set[netip.MustParsePrefix("fd00::1/128")] {
+		t.Fatal("IPv6 whitelist entry must be ignored, not expanded")
 	}
 	for _, p := range c.CustomWhitelist {
 		if p.String() == "bogus" {
 			t.Fatal("invalid entry must be skipped")
+		}
+		if !p.Addr().Is4() {
+			t.Fatalf("whitelist must stay IPv4-only, found %s", p)
 		}
 	}
 }

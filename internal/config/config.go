@@ -15,6 +15,7 @@
 package config
 
 import (
+	"log"
 	"net/netip"
 	"os"
 	"strconv"
@@ -37,13 +38,16 @@ type Config struct {
 }
 
 // defaultPrivateSubnets returns the ranges that must never enter the hostile
-// set: RFC 1918, RFC 3927 link-local, loopback, and IPv6 ULA/link-local.
-// Blocking these breaks pod-to-pod traffic, cluster DNS, and node heartbeats
-// (see AGENTS.md rule 1).
+// set: RFC 1918, RFC 3927 link-local, and loopback (see AGENTS.md rule 1).
+//
+// Only IPv4 is listed. The kernel sets are `family inet` and enforcement is
+// IPv4 iptables, so IPv6 ranges cannot be added to the whitelist set and would
+// abort the whole restore. IPv6 targets are filtered during aggregation
+// instead.
 func defaultPrivateSubnets() []netip.Prefix {
 	cidrs := []string{
 		"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12",
-		"192.168.0.0/16", "169.254.0.0/16", "::1/128", "fc00::/7", "fe80::/10",
+		"192.168.0.0/16", "169.254.0.0/16",
 	}
 	var list []netip.Prefix
 	for _, c := range cidrs {
@@ -70,6 +74,8 @@ func Load() Config {
 	}
 
 	// Build Whitelist: private ranges plus any operator-supplied entries.
+	// IPv6 entries are ignored with a warning: the sets are IPv4-only, so
+	// carrying one through would abort every restore.
 	combinedWhitelist := defaultPrivateSubnets()
 	if raw := os.Getenv("WHITELIST"); raw != "" {
 		for _, item := range strings.Split(raw, ",") {
@@ -78,15 +84,25 @@ func Load() Config {
 				continue
 			}
 			if strings.Contains(item, "/") {
-				if p, err := netip.ParsePrefix(item); err == nil {
-					combinedWhitelist = append(combinedWhitelist, p)
+				p, err := netip.ParsePrefix(item)
+				if err != nil {
+					continue
 				}
-			} else if addr, err := netip.ParseAddr(item); err == nil {
-				bits := 32
-				if addr.Is6() {
-					bits = 128
+				if !p.Addr().Is4() {
+					log.Printf("[Config] ignoring IPv6 whitelist entry %q: enforcement is IPv4-only", item)
+					continue
 				}
-				combinedWhitelist = append(combinedWhitelist, netip.PrefixFrom(addr, bits))
+				combinedWhitelist = append(combinedWhitelist, p)
+			} else {
+				addr, err := netip.ParseAddr(item)
+				if err != nil {
+					continue
+				}
+				if !addr.Is4() {
+					log.Printf("[Config] ignoring IPv6 whitelist entry %q: enforcement is IPv4-only", item)
+					continue
+				}
+				combinedWhitelist = append(combinedWhitelist, netip.PrefixFrom(addr, 32))
 			}
 		}
 	}

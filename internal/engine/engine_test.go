@@ -314,6 +314,36 @@ func TestScanAndReconcileDoesNotRecordUpdateOnSyncFailure(t *testing.T) {
 	}
 }
 
+// IPv6 targets must be dropped during aggregation. The kernel sets and the
+// iptables enforcement are IPv4-only, so a v6 literal would abort the restore
+// with "128 is out of range 0-32" and also could not be enforced.
+func TestAggregateDropsIPv6(t *testing.T) {
+	var calls []kernelCall
+	e := newEngine(metrics.New(), []string{
+		"1.2.3.4",
+		"2001:1308:a5cc:6600:e157:76a6:16c8:37df",
+		"2001:db8::/32",
+		"5.6.7.0/24",
+	}, countingExec(&calls, nil))
+
+	entries, err := e.Aggregate(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, entry := range entries {
+		addr, err := netip.ParseAddr(strings.Split(entry, "/")[0])
+		if err != nil {
+			t.Fatalf("unparseable aggregated entry %q", entry)
+		}
+		if !addr.Is4() {
+			t.Fatalf("IPv6 entry %q must be filtered out", entry)
+		}
+	}
+	if len(entries) != 2 {
+		t.Fatalf("want the two IPv4 entries, got %v", entries)
+	}
+}
+
 func TestIsWhitelisted(t *testing.T) {
 	e := newEngine(metrics.New(), nil, nil)
 	if !e.IsWhitelisted(netip.MustParseAddr("10.1.2.3")) {
