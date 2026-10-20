@@ -21,6 +21,9 @@ type recorder struct {
 	// fresh host) and flips true once an -I installs the jump, so `-C` behaves
 	// the way iptables does.
 	jumpPresent bool
+	// failDelete makes the `-D PREROUTING` unlink fail, modelling a kernel
+	// that is reachable enough to report the jump but cannot remove it.
+	failDelete bool
 }
 
 func (r *recorder) exec(ctx context.Context, stdin io.Reader, name string, args ...string) (string, error) {
@@ -29,7 +32,11 @@ func (r *recorder) exec(ctx context.Context, stdin io.Reader, name string, args 
 	line := strings.Join(args, " ")
 	r.calls = append(r.calls, line)
 
-	if strings.Contains(line, "-t raw -C PREROUTING -j K3S_THREAT_FILTER") && !r.jumpPresent {
+	if r.failDelete && strings.Contains(line, "-t raw -D PREROUTING") {
+		return "simulated failure", errNotAttached
+	}
+
+	if strings.Contains(line, "-t raw -C PREROUTING -j THREAD_ENGINE_FILTER") && !r.jumpPresent {
 		return "no such rule", errNotAttached
 	}
 	if strings.Contains(line, "-t raw -I PREROUTING") {
@@ -87,7 +94,7 @@ func TestReconcileAttachesWhenEnabled(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	got := rec.joined()
-	if !strings.Contains(got, "-t raw -A K3S_THREAT_FILTER -m set --match-set h src -j DROP") {
+	if !strings.Contains(got, "-t raw -A THREAD_ENGINE_FILTER -m set --match-set h src -j DROP") {
 		t.Fatalf("enabled reconcile must install the DROP rule, got:\n%s", got)
 	}
 }
@@ -103,10 +110,10 @@ func TestReconcileDisablesAndStaysDisabled(t *testing.T) {
 		}
 	}
 	got := rec.joined()
-	if strings.Contains(got, "-A K3S_THREAT_FILTER -m set --match-set h src -j DROP") {
+	if strings.Contains(got, "-A THREAD_ENGINE_FILTER -m set --match-set h src -j DROP") {
 		t.Fatalf("disabled reconcile must never install a DROP rule, got:\n%s", got)
 	}
-	if !strings.Contains(got, "-X K3S_THREAT_FILTER") {
+	if !strings.Contains(got, "-X THREAD_ENGINE_FILTER") {
 		t.Fatalf("disabled reconcile must tear the chain down, got:\n%s", got)
 	}
 }
@@ -116,15 +123,57 @@ func TestSetAndReconcileAppliesImmediately(t *testing.T) {
 	if err := c.SetAndReconcile(context.Background(), true); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !c.Enabled() || !strings.Contains(rec.joined(), "-A K3S_THREAT_FILTER -m set --match-set h src -j DROP") {
+	if !c.Enabled() || !strings.Contains(rec.joined(), "-A THREAD_ENGINE_FILTER -m set --match-set h src -j DROP") {
 		t.Fatalf("SetAndReconcile(true) must attach within the call, got:\n%s", rec.joined())
 	}
 	rec.reset()
 	if err := c.SetAndReconcile(context.Background(), false); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if c.Enabled() || !strings.Contains(rec.joined(), "-X K3S_THREAT_FILTER") {
+	if c.Enabled() || !strings.Contains(rec.joined(), "-X THREAD_ENGINE_FILTER") {
 		t.Fatalf("SetAndReconcile(false) must detach within the call, got:\n%s", rec.joined())
+	}
+}
+
+func TestShutdownCleanupDetachesAndReportsNoError(t *testing.T) {
+	// Graceful shutdown must assert the disabled state so the chain is
+	// removed. Enabled -> shutdown must not leave the chain attached.
+	c, rec := newController(false)
+	if err := c.SetAndReconcile(context.Background(), true); err != nil {
+		t.Fatalf("setup attach: %v", err)
+	}
+	if !c.Enabled() {
+		t.Fatal("setup: expected enabled")
+	}
+	rec.reset()
+
+	if err := c.Shutdown(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.Enabled() {
+		t.Fatal("Shutdown must leave the flag disabled")
+	}
+	got := rec.joined()
+	if strings.Contains(got, "-A THREAD_ENGINE_FILTER -m set --match-set h src -j DROP") {
+		t.Fatalf("Shutdown must not install a DROP rule, got:\n%s", got)
+	}
+	if !strings.Contains(got, "-X THREAD_ENGINE_FILTER") {
+		t.Fatalf("Shutdown must tear the chain down, got:\n%s", got)
+	}
+}
+
+func TestShutdownToleratesKernelFailure(t *testing.T) {
+	// A wedged or unavailable iptables must not prevent the process from
+	// exiting. The error is reported, and the flag is still cleared so a
+	// later Reconcile cannot resurrect the rules.
+	r := &recorder{jumpPresent: true, failDelete: true}
+	e := &iptables.Enforcer{HostileSetName: "h", WhitelistSetName: "w", Exec: r.exec}
+	c := enforcement.New(e, true)
+	if err := c.Shutdown(context.Background()); err == nil {
+		t.Fatal("a kernel failure during shutdown must be reported")
+	}
+	if c.Enabled() {
+		t.Fatal("the flag must be cleared even when the kernel call fails")
 	}
 }
 

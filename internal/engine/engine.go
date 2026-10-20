@@ -34,6 +34,11 @@ type Engine struct {
 	// lastEnforcement is the last state announced in the log; nil means
 	// "unknown", so the first scan always announces its state once.
 	lastEnforcement *bool
+
+	// setsEnsured is set once the kernel sets have been asserted to exist.
+	// The run is retried on later scans until it succeeds, because the attach
+	// cannot work without them.
+	setsEnsured bool
 }
 
 // IsWhitelisted reports whether addr falls inside any configured whitelist
@@ -153,6 +158,21 @@ func (e *Engine) ScanAndReconcile(ctx context.Context) {
 	fingerprint := Fingerprint(entries)
 
 	e.Metrics.RecordScanSuccess(len(e.Whitelist))
+
+	// The enforcement rules name the ipsets, so the sets must exist before the
+	// attach that references them. On a cold start nothing has created them
+	// yet, and Sync — the other creator — sits behind the change guard below,
+	// so the daemon would otherwise hook an empty chain and enforce nothing
+	// until the next tick. Failure is not fatal for the cycle: it is retried
+	// on every scan until it succeeds, and the reconcile below reports its own
+	// error if the sets are still missing.
+	if !e.setsEnsured {
+		if err := e.IPSet.EnsureSets(ctx); err != nil {
+			log.Printf("[Kernel Error] could not ensure ipset tables exist: %v", err)
+		} else {
+			e.setsEnsured = true
+		}
+	}
 
 	// Enforcement is reconciled on every scan, before the change guard: the
 	// flag must be asserted even when the blocklist contents did not change,

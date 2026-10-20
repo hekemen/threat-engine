@@ -60,8 +60,39 @@ curl -s 'http://127.0.0.1:9090/check?ip=92.118.39.229'
 sudo ipset list k3s_hostile_ips -terse
 
 # The chain and jump exist ONLY while enforcement is on
-sudo iptables -t raw -S | grep K3S_THREAT_FILTER
-sudo iptables -t raw -L K3S_THREAT_FILTER -v -n   # whitelist RETURN before hostile DROP
+sudo iptables -t raw -S | grep THREAD_ENGINE_FILTER
+sudo iptables -t raw -L THREAD_ENGINE_FILTER -v -n   # whitelist RETURN before hostile DROP
+```
+
+### Stopping the daemon
+
+A graceful stop (`docker compose down`, `systemctl stop`, `SIGTERM`) **tears
+everything down**: the `THREAD_ENGINE_FILTER` chain, its `raw:PREROUTING` jump,
+and both kernel sets are removed, returning the host to its pre-daemon state.
+
+A non-graceful death (`SIGKILL`, an OOM kill, power loss) cannot run that
+cleanup, so the chain stays attached and keeps dropping against the last
+blocklist it received. To clear it by hand:
+
+```bash
+sudo iptables -t raw -D PREROUTING -j THREAD_ENGINE_FILTER
+sudo iptables -t raw -F THREAD_ENGINE_FILTER
+sudo iptables -t raw -X THREAD_ENGINE_FILTER
+sudo ipset destroy k3s_hostile_ips
+sudo ipset destroy k3s_whitelist_ips
+```
+
+### Upgrading from a build that used `K3S_THREAT_FILTER`
+
+The chain was renamed to `THREAD_ENGINE_FILTER`. On startup the daemon removes a
+leftover `K3S_THREAT_FILTER` chain and its jump, in the `raw` table only, so an
+in-place upgrade does not leave the old chain dropping traffic. If you prefer to
+do it yourself first:
+
+```bash
+sudo iptables -t raw -D PREROUTING -j K3S_THREAT_FILTER 2>/dev/null
+sudo iptables -t raw -F K3S_THREAT_FILTER 2>/dev/null
+sudo iptables -t raw -X K3S_THREAT_FILTER 2>/dev/null
 ```
 
 ## Deployment

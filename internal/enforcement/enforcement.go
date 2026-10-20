@@ -72,3 +72,15 @@ func (c *Controller) SetAndReconcile(ctx context.Context, enabled bool) error {
 	c.Set(enabled)
 	return c.Reconcile(ctx)
 }
+
+// Shutdown tears the enforcement rules down on the way out. It clears the flag
+// first and then reconciles, so the kernel ends in the disabled state even if
+// the iptables call fails: reporting the error to the caller is what matters,
+// and holding the process open over a wedged kernel call would be worse.
+//
+// This exists because a bare `return` on SIGTERM left the chain attached with
+// a stale blocklist, still dropping packets long after the daemon was gone.
+func (c *Controller) Shutdown(ctx context.Context) error {
+	c.Set(false)
+	return c.Reconcile(ctx)
+}

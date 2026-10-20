@@ -35,26 +35,103 @@ func callLines(calls []call) []string {
 	return out
 }
 
+func TestCleanupLegacyChainRemovesOldName(t *testing.T) {
+	// The chain was renamed from K3S_THREAT_FILTER to THREAD_ENGINE_FILTER.
+	// A host upgrading in place still has the old chain hooked into
+	// raw:PREROUTING, where it keeps dropping packets. Startup must remove it.
+	var calls []call
+	e := &iptables.Enforcer{
+		HostileSetName:   "k3s_hostile_ips",
+		WhitelistSetName: "k3s_whitelist_ips",
+		// An empty fail map means every command succeeds, which is how
+		// `iptables -C` signals "the jump is present".
+		Exec: scriptedExec(&calls, map[string]bool{}),
+	}
+	if err := e.CleanupLegacy(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{
+		"iptables -t raw -C PREROUTING -j K3S_THREAT_FILTER",
+		"iptables -t raw -D PREROUTING -j K3S_THREAT_FILTER",
+		"iptables -t raw -F K3S_THREAT_FILTER",
+		"iptables -t raw -X K3S_THREAT_FILTER",
+	}
+	got := callLines(calls)
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("legacy cleanup sequence mismatch:\ngot:\n%s\nwant:\n%s",
+			strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestCleanupLegacyChainNoopWhenAbsent(t *testing.T) {
+	// Nothing to remove must be success, so a fresh install does not fail
+	// or log an error on every start.
+	var calls []call
+	e := &iptables.Enforcer{
+		HostileSetName: "k3s_hostile_ips", WhitelistSetName: "k3s_whitelist_ips",
+		Exec: scriptedExec(&calls, map[string]bool{
+			"-t raw -C PREROUTING -j K3S_THREAT_FILTER": true, // no jump
+			"-t raw -F K3S_THREAT_FILTER":               true, // no chain
+			"-t raw -X K3S_THREAT_FILTER":               true,
+		}),
+	}
+	if err := e.CleanupLegacy(context.Background()); err != nil {
+		t.Fatalf("absent legacy chain must not be an error: %v", err)
+	}
+	// It must not delete the jump it never confirmed.
+	for _, line := range callLines(calls) {
+		if strings.Contains(line, "-D PREROUTING") {
+			t.Fatalf("must not delete a jump that is not present: %q", line)
+		}
+	}
+}
+
+func TestCleanupLegacyOnlyTouchesRawTable(t *testing.T) {
+	// Safety: the daemon removes a chain it did not create. Every command
+	// must stay in the raw table so no other table can be affected.
+	var calls []call
+	e := &iptables.Enforcer{
+		HostileSetName: "k3s_hostile_ips", WhitelistSetName: "k3s_whitelist_ips",
+		Exec: scriptedExec(&calls, map[string]bool{
+			"-t raw -C PREROUTING -j K3S_THREAT_FILTER": true, // jump absent
+		}),
+	}
+	if err := e.CleanupLegacy(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, c := range calls {
+		if c.args[0] != "-t" || c.args[1] != "raw" {
+			t.Fatalf("every legacy cleanup command must use -t raw: %v", c.args)
+		}
+	}
+}
+
+func TestChainNameIsThreadEngineFilter(t *testing.T) {
+	if iptables.ChainName != "THREAD_ENGINE_FILTER" {
+		t.Fatalf("ChainName = %q, want THREAD_ENGINE_FILTER", iptables.ChainName)
+	}
+}
+
 func TestEnsureChainExactSequence(t *testing.T) {
 	var calls []call
 	e := &iptables.Enforcer{
 		HostileSetName:   "k3s_hostile_ips",
 		WhitelistSetName: "k3s_whitelist_ips",
 		Exec: scriptedExec(&calls, map[string]bool{
-			"-t raw -N K3S_THREAT_FILTER":               true, // chain already exists
-			"-t raw -C PREROUTING -j K3S_THREAT_FILTER": true, // jump missing → insert
+			"-t raw -N THREAD_ENGINE_FILTER":               true, // chain already exists
+			"-t raw -C PREROUTING -j THREAD_ENGINE_FILTER": true, // jump missing → insert
 		}),
 	}
 	if err := e.Attach(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	want := []string{
-		"iptables -t raw -N K3S_THREAT_FILTER",
-		"iptables -t raw -C PREROUTING -j K3S_THREAT_FILTER",
-		"iptables -t raw -I PREROUTING 1 -j K3S_THREAT_FILTER",
-		"iptables -t raw -F K3S_THREAT_FILTER",
-		"iptables -t raw -A K3S_THREAT_FILTER -m set --match-set k3s_whitelist_ips src -j RETURN",
-		"iptables -t raw -A K3S_THREAT_FILTER -m set --match-set k3s_hostile_ips src -j DROP",
+		"iptables -t raw -N THREAD_ENGINE_FILTER",
+		"iptables -t raw -C PREROUTING -j THREAD_ENGINE_FILTER",
+		"iptables -t raw -I PREROUTING 1 -j THREAD_ENGINE_FILTER",
+		"iptables -t raw -F THREAD_ENGINE_FILTER",
+		"iptables -t raw -A THREAD_ENGINE_FILTER -m set --match-set k3s_whitelist_ips src -j RETURN",
+		"iptables -t raw -A THREAD_ENGINE_FILTER -m set --match-set k3s_hostile_ips src -j DROP",
 	}
 	if len(calls) != len(want) {
 		t.Fatalf("got %d calls: %+v", len(calls), calls)
@@ -81,13 +158,13 @@ func TestAttachDoesNotFlushWhenAlreadyAttached(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	joined := strings.Join(callLines(calls), "\n")
-	for _, forbidden := range []string{"-F K3S_THREAT_FILTER", "-A K3S_THREAT_FILTER"} {
+	for _, forbidden := range []string{"-F THREAD_ENGINE_FILTER", "-A THREAD_ENGINE_FILTER"} {
 		if strings.Contains(joined, forbidden) {
 			t.Fatalf("Attach must not rebuild an already-attached chain (saw %q):\n%s", forbidden, joined)
 		}
 	}
 	// It must still have confirmed the jump is present.
-	if !strings.Contains(joined, "-t raw -C PREROUTING -j K3S_THREAT_FILTER") {
+	if !strings.Contains(joined, "-t raw -C PREROUTING -j THREAD_ENGINE_FILTER") {
 		t.Fatalf("Attach must probe the jump even when nothing needs doing:\n%s", joined)
 	}
 }
@@ -96,13 +173,13 @@ func TestEnsureChainSkipsInsertWhenJumpExists(t *testing.T) {
 	var calls []call
 	e := &iptables.Enforcer{
 		HostileSetName: "h", WhitelistSetName: "w",
-		Exec: scriptedExec(&calls, map[string]bool{"-t raw -N K3S_THREAT_FILTER": true}),
+		Exec: scriptedExec(&calls, map[string]bool{"-t raw -N THREAD_ENGINE_FILTER": true}),
 	}
 	if err := e.Attach(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	for _, c := range calls {
-		if strings.Join(c.args, " ") == "-t raw -I PREROUTING 1 -j K3S_THREAT_FILTER" {
+		if strings.Join(c.args, " ") == "-t raw -I PREROUTING 1 -j THREAD_ENGINE_FILTER" {
 			t.Fatal("insert must be skipped when -C succeeds")
 		}
 	}
@@ -113,8 +190,8 @@ func TestEnsureChainInsertFailureIsFatal(t *testing.T) {
 	e := &iptables.Enforcer{
 		HostileSetName: "h", WhitelistSetName: "w",
 		Exec: scriptedExec(&calls, map[string]bool{
-			"-t raw -C PREROUTING -j K3S_THREAT_FILTER":   true,
-			"-t raw -I PREROUTING 1 -j K3S_THREAT_FILTER": true,
+			"-t raw -C PREROUTING -j THREAD_ENGINE_FILTER":   true,
+			"-t raw -I PREROUTING 1 -j THREAD_ENGINE_FILTER": true,
 		}),
 	}
 	err := e.Attach(context.Background())
@@ -129,8 +206,8 @@ func TestEnsureChainRuleErrorFatal(t *testing.T) {
 		HostileSetName: "h", WhitelistSetName: "w",
 		Exec: scriptedExec(&calls, map[string]bool{
 			// The jump must be missing for the body to be rebuilt at all.
-			"-t raw -C PREROUTING -j K3S_THREAT_FILTER":                      true,
-			"-t raw -A K3S_THREAT_FILTER -m set --match-set w src -j RETURN": true,
+			"-t raw -C PREROUTING -j THREAD_ENGINE_FILTER":                      true,
+			"-t raw -A THREAD_ENGINE_FILTER -m set --match-set w src -j RETURN": true,
 		}),
 	}
 	err := e.Attach(context.Background())
@@ -151,10 +228,10 @@ func TestDetachRemovesJumpAndChain(t *testing.T) {
 	joined := strings.Join(callLines(calls), "\n")
 	// With the jump present, it must be deleted, and the chain must be removed.
 	for _, want := range []string{
-		"-t raw -C PREROUTING -j K3S_THREAT_FILTER",
-		"-t raw -D PREROUTING -j K3S_THREAT_FILTER",
-		"-t raw -F K3S_THREAT_FILTER",
-		"-t raw -X K3S_THREAT_FILTER",
+		"-t raw -C PREROUTING -j THREAD_ENGINE_FILTER",
+		"-t raw -D PREROUTING -j THREAD_ENGINE_FILTER",
+		"-t raw -F THREAD_ENGINE_FILTER",
+		"-t raw -X THREAD_ENGINE_FILTER",
 	} {
 		if !strings.Contains(joined, "iptables "+want) {
 			t.Fatalf("Detach missing %q, got:\n%s", want, joined)
@@ -177,9 +254,9 @@ func TestDetachIsNoOpWhenNothingAttached(t *testing.T) {
 	e := &iptables.Enforcer{
 		HostileSetName: "h", WhitelistSetName: "w",
 		Exec: scriptedExec(&calls, map[string]bool{
-			"-t raw -C PREROUTING -j K3S_THREAT_FILTER": true, // jump absent
-			"-t raw -F K3S_THREAT_FILTER":               true, // chain absent
-			"-t raw -X K3S_THREAT_FILTER":               true,
+			"-t raw -C PREROUTING -j THREAD_ENGINE_FILTER": true, // jump absent
+			"-t raw -F THREAD_ENGINE_FILTER":               true, // chain absent
+			"-t raw -X THREAD_ENGINE_FILTER":               true,
 		}),
 	}
 	if err := e.Detach(context.Background()); err != nil {
@@ -191,7 +268,7 @@ func TestDetachIsNoOpWhenNothingAttached(t *testing.T) {
 	}
 	// The chain can exist while the jump is gone, so teardown must still try
 	// to remove it even when the probe fails.
-	for _, want := range []string{"-t raw -F K3S_THREAT_FILTER", "-t raw -X K3S_THREAT_FILTER"} {
+	for _, want := range []string{"-t raw -F THREAD_ENGINE_FILTER", "-t raw -X THREAD_ENGINE_FILTER"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("Detach must still attempt %q, got:\n%s", want, joined)
 		}
@@ -204,17 +281,17 @@ func TestIsAttachedExitCodeSemantics(t *testing.T) {
 	if !e.IsAttached(context.Background()) {
 		t.Fatal("clean exit must mean attached")
 	}
-	e.Exec = scriptedExec(&calls, map[string]bool{"-t raw -C PREROUTING -j K3S_THREAT_FILTER": true})
+	e.Exec = scriptedExec(&calls, map[string]bool{"-t raw -C PREROUTING -j THREAD_ENGINE_FILTER": true})
 	if e.IsAttached(context.Background()) {
 		t.Fatal("non-zero exit must mean not attached")
 	}
 	// Both probes share the calls slice: each must have been exactly
-	// `iptables -t raw -C PREROUTING -j K3S_THREAT_FILTER`.
+	// `iptables -t raw -C PREROUTING -j THREAD_ENGINE_FILTER`.
 	if len(calls) != 2 {
 		t.Fatalf("expected 2 probes, got %+v", calls)
 	}
 	for i, c := range calls {
-		if got := c.name + " " + strings.Join(c.args, " "); got != "iptables -t raw -C PREROUTING -j K3S_THREAT_FILTER" {
+		if got := c.name + " " + strings.Join(c.args, " "); got != "iptables -t raw -C PREROUTING -j THREAD_ENGINE_FILTER" {
 			t.Fatalf("probe %d = %q, want the -C PREROUTING jump test", i, got)
 		}
 	}

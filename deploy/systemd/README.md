@@ -70,7 +70,7 @@ Inspect the kernel state:
 
 ```bash
 sudo ipset list k3s_hostile_ips -terse
-sudo iptables -t raw -L K3S_THREAT_FILTER -v -n
+sudo iptables -t raw -L THREAD_ENGINE_FILTER -v -n
 ```
 
 The chain only exists while enforcement is on.
@@ -103,9 +103,9 @@ Removing the service does **not** clean up the kernel state. If enforcement was
 on, remove the rules and tables:
 
 ```bash
-sudo iptables -t raw -D PREROUTING -j K3S_THREAT_FILTER
-sudo iptables -t raw -F K3S_THREAT_FILTER
-sudo iptables -t raw -X K3S_THREAT_FILTER
+sudo iptables -t raw -D PREROUTING -j THREAD_ENGINE_FILTER
+sudo iptables -t raw -F THREAD_ENGINE_FILTER
+sudo iptables -t raw -X THREAD_ENGINE_FILTER
 sudo ipset destroy k3s_hostile_ips
 sudo ipset destroy k3s_whitelist_ips
 ```

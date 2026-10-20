@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"net/netip"
 	"strings"
 
@@ -75,6 +76,58 @@ func (m *Manager) Sync(ctx context.Context, entries []string) error {
 		return fmt.Errorf("ipset restore failed: %v: %s", err, out)
 	}
 	return nil
+}
+
+// EnsureSets creates both kernel sets if they are not already there, leaving
+// their contents untouched. It exists because the enforcement rules reference
+// these sets: `iptables -A ... --match-set k3s_hostile_ips` fails outright
+// while the set is missing ("Set k3s_hostile_ips doesn't exist"), and on a
+// cold start nothing has created them yet.
+//
+// Sync also creates them, but Sync runs behind the scan's change guard, so the
+// engine cannot depend on it having run before it attaches. This is the
+// cheap, idempotent way to state the prerequisite: `create ... -exist` is a
+// no-op once the set exists, and it never flushes or swaps, so a populated set
+// survives a restart untouched.
+func (m *Manager) EnsureSets(ctx context.Context) error {
+	var buf bytes.Buffer
+	buf.WriteString(fmt.Sprintf("create %s hash:net family inet maxelem 300000 -exist\n", m.HostileSetName))
+	buf.WriteString(fmt.Sprintf("create %s hash:net family inet maxelem 50000 -exist\n", m.WhitelistSetName))
+
+	out, err := m.Exec(ctx, &buf, "ipset", "restore")
+	if err != nil {
+		return fmt.Errorf("ipset ensure failed: %v: %s", err, out)
+	}
+	return nil
+}
+
+// Destroy removes both kernel sets. It is the graceful-shutdown counterpart to
+// Sync: stopping the daemon restores the host rather than leaving a frozen
+// blocklist behind.
+//
+// An absent set is not an error, so a first-run shutdown, or a repeated one,
+// still succeeds. A genuine failure (the set is still referenced by a rule)
+// is reported so the operator learns the host was not fully restored.
+func (m *Manager) Destroy(ctx context.Context) error {
+	var firstErr error
+	for _, name := range []string{m.HostileSetName, m.WhitelistSetName} {
+		out, err := m.Exec(ctx, nil, "ipset", "destroy", name)
+		if err != nil && !isAbsentSetError(out, err) {
+			log.Printf("[Cleanup] failed to destroy ipset %s: %v: %s", name, err, out)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("destroy %s: %v: %s", name, err, out)
+			}
+		}
+	}
+	return firstErr
+}
+
+// isAbsentSetError reports whether the failure is only "there is nothing to
+// destroy". ipset writes that message on stdout/stderr and exits non-zero, so
+// the text is the only signal available.
+func isAbsentSetError(out string, err error) bool {
+	text := strings.ToLower(out + " " + err.Error())
+	return strings.Contains(text, "does not exist") || strings.Contains(text, "no such")
 }
 
 // isIPv4Member guards the kernel boundary: `ipset add` into a `family inet` set

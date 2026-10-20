@@ -32,4 +32,4 @@ Check the current state and the blocklist size:
 
 On a node, verify the kernel state directly:
   sudo ipset list {{ .Values.sets.hostileName }} -terse
-  sudo iptables -t raw -L K3S_THREAT_FILTER -v -n
+  sudo iptables -t raw -L THREAD_ENGINE_FILTER -v -n

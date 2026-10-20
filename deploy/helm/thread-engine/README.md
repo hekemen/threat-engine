@@ -81,8 +81,8 @@ On a node, inspect the kernel directly:
 
 ```bash
 sudo ipset list k3s_hostile_ips -terse
-sudo iptables -t raw -L K3S_THREAT_FILTER -v -n
-sudo iptables -t raw -C PREROUTING -j K3S_THREAT_FILTER   # exit 0 when attached
+sudo iptables -t raw -L THREAD_ENGINE_FILTER -v -n
+sudo iptables -t raw -C PREROUTING -j THREAD_ENGINE_FILTER   # exit 0 when attached
 ```
 
 ## Monitoring
@@ -101,9 +101,9 @@ Uninstalling removes the pods but **leaves the kernel state behind**, because
 `ipset`/`iptables` objects are not Kubernetes resources. Clean up a node with:
 
 ```bash
-sudo iptables -t raw -D PREROUTING -j K3S_THREAT_FILTER
-sudo iptables -t raw -F K3S_THREAT_FILTER
-sudo iptables -t raw -X K3S_THREAT_FILTER
+sudo iptables -t raw -D PREROUTING -j THREAD_ENGINE_FILTER
+sudo iptables -t raw -F THREAD_ENGINE_FILTER
+sudo iptables -t raw -X THREAD_ENGINE_FILTER
 sudo ipset destroy k3s_hostile_ips
 sudo ipset destroy k3s_whitelist_ips
 ```

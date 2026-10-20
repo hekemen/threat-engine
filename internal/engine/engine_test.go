@@ -68,7 +68,7 @@ func countingExecWithKernel(calls *[]kernelCall, err error) runner.RunnerFn {
 		line := strings.Join(args, " ")
 		*calls = append(*calls, kernelCall{stdin: body, raw: name + " " + line})
 
-		if strings.Contains(line, "-t raw -C PREROUTING -j K3S_THREAT_FILTER") && !jumpPresent {
+		if strings.Contains(line, "-t raw -C PREROUTING -j THREAD_ENGINE_FILTER") && !jumpPresent {
 			return "no such rule", errKernel
 		}
 		if strings.Contains(line, "-t raw -I PREROUTING") {
@@ -78,6 +78,58 @@ func countingExecWithKernel(calls *[]kernelCall, err error) runner.RunnerFn {
 			jumpPresent = false
 		}
 		return "", err
+	}
+}
+
+// kernelWithSets models the real dependency between the two subsystems: an
+// `iptables` rule that names an ipset fails while that set does not exist, and
+// `ipset restore` (whose script contains `create ... -exist`) is what brings
+// the sets into being. Without this, a fake happily accepts an attach against
+// sets that were never created, which hides the cold-start ordering bug.
+func kernelWithSets(calls *[]kernelCall) runner.RunnerFn {
+	jumpPresent := false
+	sets := map[string]bool{}
+	return func(ctx context.Context, stdin io.Reader, name string, args ...string) (string, error) {
+		body := ""
+		if stdin != nil {
+			b, _ := io.ReadAll(stdin)
+			body = string(b)
+		}
+		line := strings.Join(args, " ")
+		*calls = append(*calls, kernelCall{stdin: body, raw: name + " " + line})
+
+		if name == "ipset" && strings.Contains(body, "create") {
+			for _, f := range strings.Fields(body) {
+				if strings.HasPrefix(f, "k3s_") && !strings.HasSuffix(f, "_tmp") {
+					sets[f] = true
+				}
+			}
+			return "", nil
+		}
+
+		if strings.Contains(line, "-t raw -C PREROUTING -j THREAD_ENGINE_FILTER") && !jumpPresent {
+			return "no such rule", errKernel
+		}
+		if strings.Contains(line, "-t raw -I PREROUTING") {
+			jumpPresent = true
+		}
+		if strings.Contains(line, "-t raw -D PREROUTING") {
+			jumpPresent = false
+		}
+
+		// Any rule referring to a set that was never created is rejected, the
+		// way the kernel rejects it: "Set <name> doesn't exist."
+		if strings.Contains(line, "--match-set") {
+			fields := strings.Fields(line)
+			for i, f := range fields {
+				if f == "--match-set" && i+1 < len(fields) {
+					if !sets[fields[i+1]] {
+						return "iptables: Set " + fields[i+1] + " doesn't exist.", errKernel
+					}
+				}
+			}
+		}
+		return "", nil
 	}
 }
 
@@ -160,7 +212,7 @@ func TestScanAndReconcileSkipsKernelOnUnchangedFingerprint(t *testing.T) {
 	}
 	// Disabled means nothing attaches: no chain creation, no jump insert, no
 	// rules appended. Checking only -A would miss a chain created empty.
-	for _, forbidden := range []string{"-N K3S_THREAT_FILTER", "-A K3S_THREAT_FILTER"} {
+	for _, forbidden := range []string{"-N THREAD_ENGINE_FILTER", "-A THREAD_ENGINE_FILTER"} {
 		if strings.Contains(joined, forbidden) {
 			t.Fatalf("enforcement is disabled, so %q must not happen, got:\n%s", forbidden, joined)
 		}
@@ -206,7 +258,7 @@ func TestScanPopulatesIpsetsButSkipsIptablesWhenDisabled(t *testing.T) {
 		// Detach legitimately runs -F/-X as teardown. What must never happen
 		// while disabled is attachment: creating the chain, hooking PREROUTING,
 		// or appending rules.
-		for _, forbidden := range []string{"-A K3S_THREAT_FILTER", "-N K3S_THREAT_FILTER", "-I PREROUTING"} {
+		for _, forbidden := range []string{"-A THREAD_ENGINE_FILTER", "-N THREAD_ENGINE_FILTER", "-I PREROUTING"} {
 			if strings.Contains(c.raw, forbidden) {
 				t.Fatalf("disabled enforcement must not attach (saw %q in %q)", forbidden, c.raw)
 			}
@@ -220,7 +272,7 @@ func TestScanAttachesWhenEnforcementEnabled(t *testing.T) {
 	e := newEngine(metrics.New(), []string{"1.2.3.4"}, exec)
 	e.Enforcement.Set(true)
 	e.ScanAndReconcile(context.Background())
-	if !strings.Contains(strings.Join(callArgs(calls), "\n"), "-A K3S_THREAT_FILTER -m set --match-set k3s_hostile_ips src -j DROP") {
+	if !strings.Contains(strings.Join(callArgs(calls), "\n"), "-A THREAD_ENGINE_FILTER -m set --match-set k3s_hostile_ips src -j DROP") {
 		t.Fatalf("enabled enforcement must attach the chain, got:\n%s", strings.Join(callArgs(calls), "\n"))
 	}
 }
@@ -235,7 +287,7 @@ func TestScanDetachesWhenEnforcementDisabled(t *testing.T) {
 	calls = nil
 	e.ScanAndReconcile(context.Background()) // fingerprint unchanged, but enforcement must still reconcile
 	joined := strings.Join(callArgs(calls), "\n")
-	if !strings.Contains(joined, "-X K3S_THREAT_FILTER") {
+	if !strings.Contains(joined, "-X THREAD_ENGINE_FILTER") {
 		t.Fatalf("disabling must tear down the chain even on an unchanged fingerprint, got:\n%s", joined)
 	}
 }
@@ -281,11 +333,64 @@ func TestScanDoesNotRebuildAnAlreadyAttachedChain(t *testing.T) {
 	e.ScanAndReconcile(context.Background()) // second scan: however the fingerprint fares, enforcement is already on
 
 	joined := strings.Join(callArgs(calls), "\n")
-	if strings.Contains(joined, "-F K3S_THREAT_FILTER") {
+	if strings.Contains(joined, "-F THREAD_ENGINE_FILTER") {
 		t.Fatalf("a repeat scan must not flush the live chain, got:\n%s", joined)
 	}
-	if !strings.Contains(joined, "-t raw -C PREROUTING -j K3S_THREAT_FILTER") {
+	if !strings.Contains(joined, "-t raw -C PREROUTING -j THREAD_ENGINE_FILTER") {
 		t.Fatalf("a repeat scan must still verify the jump is present, got:\n%s", joined)
+	}
+}
+
+// A cold start has no ipsets yet. The enforcement rules name those sets, so
+// reconciling before they exist leaves the chain created and hooked but with
+// no RETURN/DROP rules in it: enforcement silently does nothing until the next
+// scan. The engine must guarantee the sets exist before it attaches.
+func TestScanCreatesSetsBeforeAttachingOnColdStart(t *testing.T) {
+	var calls []kernelCall
+	e := newEngine(metrics.New(), []string{"1.2.3.4"}, kernelWithSets(&calls))
+	e.Enforcement.Set(true)
+
+	e.ScanAndReconcile(context.Background())
+
+	joined := strings.Join(callArgs(calls), "\n")
+	for _, want := range []string{
+		"-A THREAD_ENGINE_FILTER -m set --match-set k3s_whitelist_ips src -j RETURN",
+		"-A THREAD_ENGINE_FILTER -m set --match-set k3s_hostile_ips src -j DROP",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("cold start must populate the chain, missing %q in:\n%s", want, joined)
+		}
+	}
+	if !strings.Contains(joined, "-t raw -I PREROUTING 1 -j THREAD_ENGINE_FILTER") {
+		t.Fatalf("chain must be hooked, got:\n%s", joined)
+	}
+}
+
+// EnsureSets states a prerequisite, not a per-scan obligation. Once the sets
+// exist, repeating the call every tick would be pure kernel churn.
+func TestScanEnsuresSetsOnlyOnce(t *testing.T) {
+	var calls []kernelCall
+	e := newEngine(metrics.New(), []string{"1.2.3.4"}, kernelWithSets(&calls))
+
+	countEnsure := func() int {
+		n := 0
+		for _, c := range calls {
+			if strings.Contains(c.stdin, "create k3s_hostile_ips hash:net") &&
+				!strings.Contains(c.stdin, "flush") {
+				n++
+			}
+		}
+		return n
+	}
+
+	e.ScanAndReconcile(context.Background())
+	if got := countEnsure(); got != 1 {
+		t.Fatalf("first scan must ensure the sets exactly once, got %d", got)
+	}
+	calls = nil
+	e.ScanAndReconcile(context.Background())
+	if got := countEnsure(); got != 0 {
+		t.Fatalf("later scans must not re-ensure the sets, got %d", got)
 	}
 }
 

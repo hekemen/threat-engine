@@ -157,6 +157,95 @@ func TestSyncNeverEmitsIPv6IntoIPv4Sets(t *testing.T) {
 	}
 }
 
+func TestEnsureSetsCreatesBothSetsWithoutTouchingContents(t *testing.T) {
+	// The enforcement rules name these sets, so they must exist before the
+	// attach. EnsureSets is the minimal way to assert that: create both, with
+	// the same family constraint Sync uses, and never flush or swap — a
+	// populated set must survive a restart untouched.
+	var calls []recordedCall
+	m := &ipset.Manager{HostileSetName: "h", WhitelistSetName: "w", Exec: fakeExec(&calls, nil)}
+	if err := m.EnsureSets(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(calls) != 1 || calls[0].name != "ipset" || strings.Join(calls[0].args, " ") != "restore" {
+		t.Fatalf("want a single `ipset restore`, got %+v", calls)
+	}
+	body := calls[0].stdin
+	for _, want := range []string{
+		"create h hash:net family inet maxelem 300000 -exist",
+		"create w hash:net family inet maxelem 50000 -exist",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in restore script:\n%s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"flush", "swap", "destroy", "add "} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("EnsureSets must not touch set contents (saw %q):\n%s", forbidden, body)
+		}
+	}
+}
+
+func TestEnsureSetsReportsFailure(t *testing.T) {
+	var calls []recordedCall
+	m := &ipset.Manager{
+		HostileSetName: "h", WhitelistSetName: "w",
+		Exec: fakeExec(&calls, errors.New("exit status 1: ipset v7.22: Permission denied")),
+	}
+	if err := m.EnsureSets(context.Background()); err == nil {
+		t.Fatal("a failed ensure must be reported, not swallowed")
+	}
+}
+
+func TestDestroyRemovesBothSets(t *testing.T) {
+	// Graceful shutdown destroys the kernel tables so stopping the daemon
+	// restores the host instead of leaving a frozen blocklist behind.
+	var calls []recordedCall
+	m := &ipset.Manager{HostileSetName: "h", WhitelistSetName: "w", Exec: fakeExec(&calls, nil)}
+	if err := m.Destroy(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"ipset destroy h", "ipset destroy w"}
+	if len(calls) != len(want) {
+		t.Fatalf("got %d calls, want %d: %+v", len(calls), len(want), calls)
+	}
+	for i, w := range want {
+		got := calls[i].name + " " + strings.Join(calls[i].args, " ")
+		if got != w {
+			t.Fatalf("call %d = %q, want %q", i, got, w)
+		}
+	}
+}
+
+func TestDestroyIgnoresAbsentSet(t *testing.T) {
+	// Destroy must be idempotent: a first-run shutdown, or a repeated
+	// shutdown, must not fail because the set was never created.
+	var calls []recordedCall
+	m := &ipset.Manager{
+		HostileSetName: "h", WhitelistSetName: "w",
+		Exec: fakeExec(&calls, errors.New("exit status 1: ipset v7.22: The set with the given name does not exist")),
+	}
+	if err := m.Destroy(context.Background()); err != nil {
+		t.Fatalf("an absent set must not be an error, got: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("both sets must still be attempted, got %+v", calls)
+	}
+}
+
+func TestDestroyReportsRealFailure(t *testing.T) {
+	// A genuine failure (e.g. the set is still referenced by an iptables
+	// rule) must surface, so the operator learns the host was not restored.
+	var calls []recordedCall
+	m := &ipset.Manager{
+		HostileSetName: "h", WhitelistSetName: "w",
+		Exec: fakeExec(&calls, errors.New("exit status 1: ipset v7.22: Set cannot be destroyed: it is in use by a kernel component")),
+	}
+	if err := m.Destroy(context.Background()); err == nil {
+		t.Fatal("a set that cannot be destroyed must be reported")
+	}
+}
+
 func TestContainsExitCodeSemantics(t *testing.T) {
 	var calls []recordedCall
 	m := &ipset.Manager{HostileSetName: "h", WhitelistSetName: "w", Exec: fakeExec(&calls, nil)}

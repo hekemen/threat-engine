@@ -49,6 +49,14 @@ func main() {
 	}
 	ctl := enforcement.New(firewall, cfg.EnforcementEnabled)
 
+	// Remove a chain left by the pre-rename version, which is still hooked
+	// into raw:PREROUTING and still dropping packets. Best-effort: a host
+	// without the legacy chain is the normal case, and a failure here must
+	// not stop the daemon from starting.
+	if err := firewall.CleanupLegacy(context.Background()); err != nil {
+		log.Printf("[Cleanup Warning] could not remove legacy %s chain: %v", iptables.LegacyChainName, err)
+	}
+
 	if cfg.EnforcementEnabled {
 		log.Printf("Enforcement: ENABLED — hostile DROP rules will be attached to raw:PREROUTING.")
 	} else {
@@ -117,6 +125,23 @@ func main() {
 			log.Printf("Received signal %v. Cleaning up...", sig)
 			server.Shutdown(context.Background())
 			adminServer.Shutdown(context.Background())
+
+			// Tear the kernel back down before exiting. Without this the chain
+			// and its DROP rule survived the process, leaving the host
+			// filtering against a blocklist nothing was refreshing.
+			//
+			// Bounded: a wedged iptables must not keep the container alive
+			// until the runtime's own kill timeout.
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer shutdownCancel()
+
+			if err := ctl.Shutdown(shutdownCtx); err != nil {
+				log.Printf("[Cleanup] enforcement teardown failed: %v — the chain may still be attached", err)
+			}
+			if err := setManager.Destroy(shutdownCtx); err != nil {
+				log.Printf("[Cleanup] ipset destroy failed: %v — kernel sets may remain", err)
+			}
+			log.Printf("[Cleanup] enforcement detached and kernel sets removed.")
 			return
 		}
 	}
