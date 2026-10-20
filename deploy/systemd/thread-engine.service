@@ -1,0 +1,43 @@
+[Unit]
+Description=K3s Threat Engine (ipset/iptables blocklist daemon)
+Documentation=https://github.com/hekemen/thread-engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/threat-engine
+EnvironmentFile=-/etc/thread-engine/thread-engine.env
+
+# The daemon manipulates the host's netfilter tables, so it needs the two
+# network capabilities rather than a fully privileged service.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+
+# No User= is set deliberately: creating/swapping ipsets and editing iptables
+# rules requires root-equivalent network administration. The hardening below
+# narrows what the process can touch to compensate.
+
+# NOTE: ProtectKernelModules is deliberately NOT set. The daemon may need to
+# load the netfilter set modules (ip_set, ip_set_hash_net, xt_set), and setting
+# that directive would make loading them impossible, leaving enforcement
+# silently unable to attach its rules.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+
+# The feeds are remote and occasionally flaky; always come back.
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
