@@ -15,21 +15,25 @@ import (
 	"sync"
 
 	"github.com/hekemen/thread-engine/internal/adapters"
+	"github.com/hekemen/thread-engine/internal/enforcement"
 	"github.com/hekemen/thread-engine/internal/ipset"
-	"github.com/hekemen/thread-engine/internal/iptables"
 	"github.com/hekemen/thread-engine/internal/metrics"
 )
 
 // Engine owns the scan-reconcile pipeline. Every collaborator is injected so
 // the pipeline can be driven in tests without network or kernel access.
 type Engine struct {
-	Adapters  []adapters.FeedAdapter
-	Whitelist []netip.Prefix
-	IPSet     *ipset.Manager
-	Firewall  *iptables.Enforcer
-	Metrics   *metrics.Metrics
+	Adapters    []adapters.FeedAdapter
+	Whitelist   []netip.Prefix
+	IPSet       *ipset.Manager
+	Enforcement *enforcement.Controller
+	Metrics     *metrics.Metrics
 	// HTTPClient is shared by all adapters for one scan.
 	HTTPClient *http.Client
+
+	// lastEnforcement is the last state announced in the log; nil means
+	// "unknown", so the first scan always announces its state once.
+	lastEnforcement *bool
 }
 
 // IsWhitelisted reports whether addr falls inside any configured whitelist
@@ -130,6 +134,16 @@ func (e *Engine) ScanAndReconcile(ctx context.Context) {
 
 	e.Metrics.RecordScanSuccess(len(e.Whitelist))
 
+	// Enforcement is reconciled on every scan, before the change guard: the
+	// flag must be asserted even when the blocklist contents did not change,
+	// otherwise a manual `iptables -F` or a toggle would go unapplied until the
+	// feed itself changed.
+	e.logEnforcementTransition()
+	if err := e.Enforcement.Reconcile(ctx); err != nil {
+		log.Printf("[Kernel Error] enforcement reconcile failed: %v", err)
+		return
+	}
+
 	// Change Detection Guard
 	if fingerprint == e.Metrics.Fingerprint() {
 		log.Printf("[Scanner] SHA-256 fingerprint matches (%s). Zero changes detected; skipping kernel update.", fingerprint[:12])
@@ -143,12 +157,23 @@ func (e *Engine) ScanAndReconcile(ctx context.Context) {
 		return
 	}
 
-	if err := e.Firewall.EnsureChain(ctx); err != nil {
-		log.Printf("[Kernel Error] iptables chain configuration failed: %v", err)
-		return
-	}
-
 	e.Metrics.RecordUpdate(fingerprint, len(entries))
 
 	log.Printf("[Scanner Complete] Successfully applied updated rules. Blocklist entries: %d", len(entries))
+}
+
+// logEnforcementTransition prints a prominent line whenever the desired
+// enforcement state differs from the last one announced. This is a
+// security-relevant state change, so it is logged in both directions.
+func (e *Engine) logEnforcementTransition() {
+	enabled := e.Enforcement.Enabled()
+	if e.lastEnforcement != nil && *e.lastEnforcement == enabled {
+		return
+	}
+	if enabled {
+		log.Printf("[Enforcement] ENABLED — hostile DROP rules are now active")
+	} else {
+		log.Printf("[Enforcement] DISABLED — kernel rules removed, packets are no longer filtered")
+	}
+	e.lastEnforcement = &enabled
 }

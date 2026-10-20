@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/hekemen/thread-engine/internal/adapters"
+	"github.com/hekemen/thread-engine/internal/enforcement"
 	"github.com/hekemen/thread-engine/internal/engine"
 	"github.com/hekemen/thread-engine/internal/ipset"
 	"github.com/hekemen/thread-engine/internal/iptables"
@@ -28,7 +29,7 @@ func (f *fakeAdapter) Fetch(ctx context.Context, client *http.Client) ([]string,
 	return f.entries, f.err
 }
 
-type kernelCall struct{ stdin string }
+type kernelCall struct{ stdin, raw string }
 
 func countingExec(calls *[]kernelCall, err error) runner.RunnerFn {
 	return func(ctx context.Context, stdin io.Reader, name string, args ...string) (string, error) {
@@ -37,20 +38,28 @@ func countingExec(calls *[]kernelCall, err error) runner.RunnerFn {
 			b, _ := io.ReadAll(stdin)
 			body = string(b)
 		}
-		*calls = append(*calls, kernelCall{body})
+		*calls = append(*calls, kernelCall{stdin: body, raw: name + " " + strings.Join(args, " ")})
 		return "", err
 	}
+}
+
+func callArgs(calls []kernelCall) []string {
+	out := make([]string, 0, len(calls))
+	for _, c := range calls {
+		out = append(out, c.raw)
+	}
+	return out
 }
 
 func newEngine(m *metrics.Metrics, entries []string, exec runner.RunnerFn) *engine.Engine {
 	whitelist := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
 	return &engine.Engine{
-		Adapters:   []adapters.FeedAdapter{&fakeAdapter{name: "fake", entries: entries}},
-		Whitelist:  whitelist,
-		IPSet:      &ipset.Manager{HostileSetName: "k3s_hostile_ips", WhitelistSetName: "k3s_whitelist_ips", Whitelist: whitelist, Exec: exec},
-		Firewall:   &iptables.Enforcer{HostileSetName: "k3s_hostile_ips", WhitelistSetName: "k3s_whitelist_ips", Exec: exec},
-		Metrics:    m,
-		HTTPClient: &http.Client{},
+		Adapters:    []adapters.FeedAdapter{&fakeAdapter{name: "fake", entries: entries}},
+		Whitelist:   whitelist,
+		IPSet:       &ipset.Manager{HostileSetName: "k3s_hostile_ips", WhitelistSetName: "k3s_whitelist_ips", Whitelist: whitelist, Exec: exec},
+		Enforcement: enforcement.New(&iptables.Enforcer{HostileSetName: "k3s_hostile_ips", WhitelistSetName: "k3s_whitelist_ips", Exec: exec}, false),
+		Metrics:     m,
+		HTTPClient:  &http.Client{},
 	}
 }
 
@@ -105,20 +114,89 @@ func TestScanAndReconcileSkipsKernelOnUnchangedFingerprint(t *testing.T) {
 	m := metrics.New()
 	e := newEngine(m, entries, countingExec(&calls, nil))
 	e.ScanAndReconcile(context.Background()) // first scan: applies
-	// 1 ipset restore + 5 iptables calls (-N, -C, -F, -A RETURN, -A DROP; no insert since -C succeeds)
-	if len(calls) != 6 {
-		t.Fatalf("first scan: got %d kernel calls, want 6: %+v", len(calls), calls)
+
+	// Enforcement is disabled in newEngine. The disabled reconcile runs its
+	// Detach probe first, so the ipset restore is no longer call[0] — assert
+	// that it happened, and that no rules were installed.
+	joined := strings.Join(callArgs(calls), "\n")
+	var sawIpsetRestore bool
+	for _, c := range calls {
+		if strings.Contains(c.stdin, "swap k3s_hostile_ips_tmp k3s_hostile_ips") {
+			sawIpsetRestore = true
+		}
 	}
-	if !strings.Contains(calls[0].stdin, "swap k3s_hostile_ips_tmp k3s_hostile_ips") {
-		t.Fatalf("first kernel call must be the ipset restore script, got stdin %q", calls[0].stdin)
+	if !sawIpsetRestore {
+		t.Fatalf("first scan must sync the ipsets, got calls:\n%s", joined)
 	}
+	if strings.Contains(joined, "-A K3S_THREAT_FILTER") {
+		t.Fatalf("enforcement is disabled, so no rules may be installed, got:\n%s", joined)
+	}
+
 	calls = nil
 	e.ScanAndReconcile(context.Background()) // second scan: identical hash
 	if len(calls) != 0 {
-		t.Fatalf("unchanged fingerprint must skip kernel work, got %d calls", len(calls))
+		// Enforcement is still reconciled every scan, so with it disabled the
+		// second scan issues only the Detach teardown — never an ipset sync.
+		for _, c := range calls {
+			if c.raw == "ipset restore" {
+				t.Fatalf("unchanged fingerprint must not re-sync ipsets, got %q", c.raw)
+			}
+		}
 	}
 	if m.Snapshot().ScanSuccessTotal != 2 {
 		t.Fatalf("both scans must count as success: %+v", m.Snapshot())
+	}
+}
+
+func TestScanPopulatesIpsetsButSkipsIptablesWhenDisabled(t *testing.T) {
+	var calls []kernelCall
+	m := metrics.New()
+	exec := countingExec(&calls, nil)
+	e := newEngine(m, []string{"1.2.3.4"}, exec) // newEngine constructs the controller with enforcement disabled
+	e.ScanAndReconcile(context.Background())
+
+	// The ipset restore must happen even though enforcement is off. It is no
+	// longer necessarily the first call: the disabled reconcile runs a Detach
+	// probe first.
+	var sawIpsetRestore bool
+	for _, c := range calls {
+		if strings.Contains(c.stdin, "swap k3s_hostile_ips_tmp k3s_hostile_ips") {
+			sawIpsetRestore = true
+		}
+	}
+	if !sawIpsetRestore {
+		t.Fatalf("ipsets must be synced even when enforcement is off; calls were %+v", calls)
+	}
+	for _, c := range calls {
+		if strings.Contains(c.raw, "-A K3S_THREAT_FILTER") {
+			t.Fatalf("disabled enforcement must not install rules, saw %q", c.raw)
+		}
+	}
+}
+
+func TestScanAttachesWhenEnforcementEnabled(t *testing.T) {
+	var calls []kernelCall
+	exec := countingExec(&calls, nil)
+	e := newEngine(metrics.New(), []string{"1.2.3.4"}, exec)
+	e.Enforcement.Set(true)
+	e.ScanAndReconcile(context.Background())
+	if !strings.Contains(strings.Join(callArgs(calls), "\n"), "-A K3S_THREAT_FILTER -m set --match-set k3s_hostile_ips src -j DROP") {
+		t.Fatalf("enabled enforcement must attach the chain, got:\n%s", strings.Join(callArgs(calls), "\n"))
+	}
+}
+
+func TestScanDetachesWhenEnforcementDisabled(t *testing.T) {
+	var calls []kernelCall
+	exec := countingExec(&calls, nil)
+	e := newEngine(metrics.New(), []string{"1.2.3.4"}, exec)
+	e.Enforcement.Set(true)
+	e.ScanAndReconcile(context.Background())
+	e.Enforcement.Set(false)
+	calls = nil
+	e.ScanAndReconcile(context.Background()) // fingerprint unchanged, but enforcement must still reconcile
+	joined := strings.Join(callArgs(calls), "\n")
+	if !strings.Contains(joined, "-X K3S_THREAT_FILTER") {
+		t.Fatalf("disabling must tear down the chain even on an unchanged fingerprint, got:\n%s", joined)
 	}
 }
 
