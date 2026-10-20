@@ -19,6 +19,7 @@ import (
 	"github.com/hekemen/thread-engine/internal/adapters"
 	"github.com/hekemen/thread-engine/internal/api"
 	"github.com/hekemen/thread-engine/internal/config"
+	"github.com/hekemen/thread-engine/internal/enforcement"
 	"github.com/hekemen/thread-engine/internal/engine"
 	"github.com/hekemen/thread-engine/internal/ipset"
 	"github.com/hekemen/thread-engine/internal/iptables"
@@ -46,19 +47,49 @@ func main() {
 		WhitelistSetName: cfg.WhitelistSetName,
 		Exec:             exec,
 	}
-	eng := &engine.Engine{
-		Adapters:   feeds,
-		Whitelist:  cfg.CustomWhitelist,
-		IPSet:      setManager,
-		Firewall:   firewall,
-		Metrics:    m,
-		HTTPClient: &http.Client{Timeout: 35 * time.Second},
+	ctl := enforcement.New(firewall, cfg.EnforcementEnabled)
+
+	if cfg.EnforcementEnabled {
+		log.Printf("Enforcement: ENABLED — hostile DROP rules will be attached to raw:PREROUTING.")
+	} else {
+		log.Printf("Enforcement: DISABLED (dry-run; ipsets populated, no kernel rules) — enable with POST http://127.0.0.1:%s/enforcement?enabled=true", cfg.AdminPort)
 	}
 
-	server := (&api.Server{Metrics: m, IPSet: setManager, Port: cfg.HTTPPort}).HTTPServer()
+	eng := &engine.Engine{
+		Adapters:    feeds,
+		Whitelist:   cfg.CustomWhitelist,
+		IPSet:       setManager,
+		Enforcement: ctl,
+		Metrics:     m,
+		HTTPClient:  &http.Client{Timeout: 35 * time.Second},
+	}
+
+	server := (&api.Server{
+		Metrics:     m,
+		IPSet:       setManager,
+		Port:        cfg.HTTPPort,
+		Enforcement: ctl,
+		AdminPort:   cfg.AdminPort,
+	}).HTTPServer()
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("HTTP server failure: %v", err)
+		}
+	}()
+
+	// The admin listener is a separate, loopback-bound server. Keeping it off
+	// the public listener is the whole access-control story: the toggle is
+	// reachable only from the host/pod itself.
+	adminServer := (&api.Server{
+		Metrics:     m,
+		IPSet:       setManager,
+		Port:        cfg.HTTPPort,
+		Enforcement: ctl,
+		AdminPort:   cfg.AdminPort,
+	}).AdminHTTPServer()
+	go func() {
+		if err := adminServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("admin HTTP server failure: %v", err)
 		}
 	}()
 
@@ -82,6 +113,7 @@ func main() {
 		case sig := <-sigChan:
 			log.Printf("Received signal %v. Cleaning up...", sig)
 			server.Shutdown(context.Background())
+			adminServer.Shutdown(context.Background())
 			return
 		}
 	}
