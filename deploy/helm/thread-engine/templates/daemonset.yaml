@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "thread-engine.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "thread-engine.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "thread-engine.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    {{- toYaml .Values.updateStrategy | nindent 4 }}
+  template:
+    metadata:
+      labels:
+        {{- include "thread-engine.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Roll the DaemonSet when the enforcement mode changes, since it is a
+        # container env var. Runtime toggles do not need a restart.
+        checksum/enforcement: {{ .Values.enforcement.enabled | toString | sha256sum | trunc 8 | quote }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      # REQUIRED. The daemon writes the host's netfilter tables; without host
+      # networking it would firewall the pod's own namespace and nothing else.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: {{ include "thread-engine.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Root is required to create/swap ipsets and edit iptables rules; the
+      # capabilities are narrowed to the two actually needed.
+      securityContext:
+        runAsUser: 0
+        runAsNonRoot: false
+      containers:
+        - name: thread-engine
+          image: {{ include "thread-engine.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+          env:
+            - name: ENFORCEMENT_ENABLED
+              value: {{ .Values.enforcement.enabled | toString | quote }}
+            - name: INTERVAL_MINUTES
+              value: {{ .Values.scan.intervalMinutes | toString | quote }}
+            - name: CONFIDENCE_THRESHOLD
+              value: {{ .Values.scan.confidenceThreshold | toString | quote }}
+            - name: HTTP_PORT
+              value: {{ .Values.http.port | toString | quote }}
+            - name: ADMIN_PORT
+              value: {{ .Values.admin.port | toString | quote }}
+            - name: HOSTILE_SET_NAME
+              value: {{ .Values.sets.hostileName | quote }}
+            - name: WHITELIST_SET_NAME
+              value: {{ .Values.sets.whitelistName | quote }}
+            {{- with .Values.whitelist }}
+            - name: WHITELIST
+              value: {{ join "," . | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.http.port }}
+              hostPort: {{ .Values.http.port }}
+              protocol: TCP
+            - name: admin
+              containerPort: {{ .Values.admin.port }}
+              # No hostPort: the daemon binds the admin listener to 127.0.0.1,
+              # so it is never exposed on the node interface.
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              # hostNetwork + 127.0.0.1 keeps this on the node, where the
+              # daemon actually listens.
+              host: 127.0.0.1
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              host: 127.0.0.1
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

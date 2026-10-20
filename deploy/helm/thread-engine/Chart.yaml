@@ -1,0 +1,12 @@
+apiVersion: v2
+name: thread-engine
+description: Kubernetes DaemonSet that populates ipset blocklists from threat-intelligence feeds and optionally enforces drops in raw:PREROUTING
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - security
+  - firewall
+  - ipset
+  - iptables
+  - threat-intelligence

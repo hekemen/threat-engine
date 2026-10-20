@@ -1,0 +1,80 @@
+# Default values for thread-engine.
+#
+# The daemon is safe by default: it populates the kernel ipset tables but does
+# NOT attach any iptables rules, so installing this chart cannot drop traffic.
+# Enforcement is enabled with `enforcement.enabled=true` or at runtime via the
+# loopback-only admin endpoint (see the chart NOTES).
+
+# Enforcement gates whether the hostile DROP rules are attached to
+# raw:PREROUTING. Disabled means the ipsets are still populated and /check and
+# the metrics still work, but no packets are filtered.
+enforcement:
+  enabled: false
+
+# Kernel ipset table names. Changing these after install leaves the old tables
+# behind; clean them up manually with `ipset destroy`.
+sets:
+  hostileName: k3s_hostile_ips
+  whitelistName: k3s_whitelist_ips
+
+scan:
+  # Polling frequency for threat feeds, in minutes.
+  intervalMinutes: 5
+  # Minimum score for confidence-weighted feeds such as IPsum.
+  confidenceThreshold: 3
+
+# Extra IPs/CIDRs that must never be blocked, in addition to the RFC 1918 and
+# link-local ranges the daemon always excludes.
+whitelist: []
+
+http:
+  port: 9090
+
+# The admin listener binds 127.0.0.1 only, so it is reachable from the host or
+# from inside the pod, never from another pod or off-host. Use
+# `kubectl port-forward` or `kubectl exec` to reach it.
+admin:
+  port: 9091
+
+image:
+  repository: ghcr.io/hekemen/thread-engine
+  tag: ""          # defaults to .Chart.appVersion when empty
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+# The daemon must be able to reach every node, including tainted ones, or the
+# firewall will be missing on exactly the nodes an operator forgot about.
+tolerations:
+  - operator: Exists
+
+nodeSelector: {}
+
+affinity: {}
+
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+
+# Requires the Prometheus Operator CRDs. Rendered only when enabled.
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  labels: {}
+
+# The daemon needs no Kubernetes API access to do its job; the ServiceAccount
+# exists so it does not run as the namespace default. Set this only if you are
+# adding your own RBAC or a sidecar that needs it.
+rbac:
+  create: false
+
+podAnnotations: {}
+podLabels: {}

@@ -1,0 +1,35 @@
+thread-engine has been installed in namespace {{ .Release.Namespace }}.
+
+{{ if .Values.enforcement.enabled -}}
+ENFORCEMENT IS ENABLED.
+  Hostile IPs from the configured feeds are being DROPPED in raw:PREROUTING
+  on every node. Whitelisted and RFC 1918 traffic is unaffected.
+
+  To turn enforcement OFF at runtime (from a node or the pod):
+    kubectl port-forward -n {{ .Release.Namespace }} daemonset/{{ include "thread-engine.fullname" . }} {{ .Values.admin.port }}:{{ .Values.admin.port }}
+    curl -s -X POST 'http://127.0.0.1:{{ .Values.admin.port }}/enforcement?enabled=false'
+{{- else -}}
+ENFORCEMENT IS DISABLED (safe default).
+  The ipset tables are populated and scrapeable, but NO iptables rules are
+  attached, so no traffic is being filtered.
+
+  To turn enforcement ON at runtime (from a node or the pod):
+    kubectl port-forward -n {{ .Release.Namespace }} daemonset/{{ include "thread-engine.fullname" . }} {{ .Values.admin.port }}:{{ .Values.admin.port }}
+    curl -s -X POST 'http://127.0.0.1:{{ .Values.admin.port }}/enforcement?enabled=true'
+
+  To enable it for every node at install/upgrade time instead:
+    helm upgrade {{ .Release.Name }} <chart> --set enforcement.enabled=true
+{{- end }}
+
+The admin listener binds 127.0.0.1 on each node, so the toggle is not reachable
+from other pods or off-host. `kubectl port-forward` and `kubectl exec` are the
+intended access paths.
+
+Check the current state and the blocklist size:
+  kubectl port-forward -n {{ .Release.Namespace }} daemonset/{{ include "thread-engine.fullname" . }} {{ .Values.http.port }}:{{ .Values.http.port }}
+  curl -s http://127.0.0.1:{{ .Values.http.port }}/metrics | grep threat_engine_
+  curl -s 'http://127.0.0.1:{{ .Values.http.port }}/check?ip=1.2.3.4'
+
+On a node, verify the kernel state directly:
+  sudo ipset list {{ .Values.sets.hostileName }} -terse
+  sudo iptables -t raw -L K3S_THREAT_FILTER -v -n
