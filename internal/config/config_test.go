@@ -56,6 +56,46 @@ func TestLoadInvalidIntervalFallsBack(t *testing.T) {
 	}
 }
 
+func TestLoadEnforcementFailSafe(t *testing.T) {
+	if config.Load().EnforcementEnabled {
+		t.Fatal("enforcement must default to disabled")
+	}
+	for _, raw := range []string{"", "flase", "TRUE!", "maybe", "enabled"} {
+		t.Setenv("ENFORCEMENT_ENABLED", raw)
+		if config.Load().EnforcementEnabled {
+			t.Fatalf("ENFORCEMENT_ENABLED=%q must fail safe to false", raw)
+		}
+	}
+}
+
+func TestLoadEnforcementTruthy(t *testing.T) {
+	for _, raw := range []string{"true", "TRUE", "1", "yes", "Yes"} {
+		t.Setenv("ENFORCEMENT_ENABLED", raw)
+		if !config.Load().EnforcementEnabled {
+			t.Fatalf("ENFORCEMENT_ENABLED=%q must enable enforcement", raw)
+		}
+	}
+}
+
+func TestLoadEnforcementFalsy(t *testing.T) {
+	for _, raw := range []string{"false", "FALSE", "0", "no"} {
+		t.Setenv("ENFORCEMENT_ENABLED", raw)
+		if config.Load().EnforcementEnabled {
+			t.Fatalf("ENFORCEMENT_ENABLED=%q must disable enforcement", raw)
+		}
+	}
+}
+
+func TestLoadAdminPort(t *testing.T) {
+	if got := config.Load().AdminPort; got != "9091" {
+		t.Fatalf("default AdminPort = %q, want 9091", got)
+	}
+	t.Setenv("ADMIN_PORT", "9191")
+	if got := config.Load().AdminPort; got != "9191" {
+		t.Fatalf("AdminPort = %q, want 9191", got)
+	}
+}
+
 func TestLoadWhitelistParsing(t *testing.T) {
 	t.Setenv("WHITELIST", "203.0.113.10, 198.51.100.0/24, fd00::1, bogus")
 	c := config.Load()

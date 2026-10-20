@@ -4,9 +4,11 @@
 //
 //	INTERVAL_MINUTES     scan interval in minutes (default 5; invalid/zero falls back)
 //	HTTP_PORT            HTTP listen port (default 9090)
+//	ADMIN_PORT           loopback-only admin listen port (default 9091)
 //	HOSTILE_SET_NAME     kernel ipset name for blocked targets (default k3s_hostile_ips)
 //	WHITELIST_SET_NAME   kernel ipset name for allowed targets (default k3s_whitelist_ips)
 //	WHITELIST            comma-separated custom IPs/CIDRs to never block
+//	ENFORCEMENT_ENABLED  attach the kernel drop rules (default false; unparseable falls back to false)
 //
 // Feed registration lives in internal/adapters, not here: config knows about
 // sets and intervals, adapters know about sources.
@@ -25,8 +27,13 @@ type Config struct {
 	HostileSetName   string
 	WhitelistSetName string
 	HTTPPort         string
+	AdminPort        string
 	ScanInterval     time.Duration
 	CustomWhitelist  []netip.Prefix
+	// EnforcementEnabled controls whether the kernel drop rules are attached.
+	// It defaults to false so that installing the daemon can never silently
+	// drop traffic; the ipset tables are populated either way.
+	EnforcementEnabled bool
 }
 
 // defaultPrivateSubnets returns the ranges that must never enter the hostile
@@ -52,6 +59,7 @@ func Load() Config {
 	hostileSet := getEnv("HOSTILE_SET_NAME", "k3s_hostile_ips")
 	whitelistSet := getEnv("WHITELIST_SET_NAME", "k3s_whitelist_ips")
 	port := getEnv("HTTP_PORT", "9090")
+	adminPort := getEnv("ADMIN_PORT", "9091")
 
 	// Scan interval: default 5 minutes
 	intervalMin := 5
@@ -84,11 +92,26 @@ func Load() Config {
 	}
 
 	return Config{
-		HostileSetName:   hostileSet,
-		WhitelistSetName: whitelistSet,
-		HTTPPort:         port,
-		ScanInterval:     time.Duration(intervalMin) * time.Minute,
-		CustomWhitelist:  combinedWhitelist,
+		HostileSetName:     hostileSet,
+		WhitelistSetName:   whitelistSet,
+		HTTPPort:           port,
+		AdminPort:          adminPort,
+		ScanInterval:       time.Duration(intervalMin) * time.Minute,
+		CustomWhitelist:    combinedWhitelist,
+		EnforcementEnabled: parseBool(os.Getenv("ENFORCEMENT_ENABLED"), false),
+	}
+}
+
+// parseBool resolves a boolean environment value. Anything unrecognized
+// returns the fallback, so a typo can never enable enforcement.
+func parseBool(raw string, fallback bool) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "true", "1", "yes":
+		return true
+	case "false", "0", "no":
+		return false
+	default:
+		return fallback
 	}
 }
 
