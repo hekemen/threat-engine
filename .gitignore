@@ -1,1 +1,11 @@
 threat-engine
+
+# Coding agent resources (runtime artifacts)
+.superpowers/
+.codebase-memory/
+.opencode/
+.claude/
+
+# Coding agent resources (kept locally, not tracked)
+AGENTS.md
+docs/superpowers/
