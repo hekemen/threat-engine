@@ -1,4 +1,4 @@
-# Default values for thread-engine.
+# Default values for threat-engine.
 #
 # The daemon is safe by default: it populates the kernel ipset tables but does
 # NOT attach any iptables rules, so installing this chart cannot drop traffic.
@@ -14,8 +14,8 @@ enforcement:
 # Kernel ipset table names. Changing these after install leaves the old tables
 # behind; clean them up manually with `ipset destroy`.
 sets:
-  hostileName: k3s_hostile_ips
-  whitelistName: k3s_whitelist_ips
+  hostileName: threat_engine_hostile_ips
+  whitelistName: threat_engine_whitelist_ips
 
 scan:
   # Polling frequency for threat feeds, in minutes.
@@ -37,7 +37,7 @@ admin:
   port: 9091
 
 image:
-  repository: ghcr.io/hekemen/thread-engine
+  repository: ghcr.io/hekemen/threat-engine
   tag: ""          # defaults to .Chart.appVersion when empty
   pullPolicy: IfNotPresent
 

@@ -43,22 +43,22 @@ docker run --rm --privileged -v "$WORKDIR:/work:ro" "$IMAGE" sh -eu -c '
   echo "restore exit=$? (0 = kernel accepted the whole transaction)"
 
   echo "--- hostile set must exist and be IPv4-only ---"
-  ipset list k3s_hostile_ips | sed -n "1,12p"
+  ipset list threat_engine_hostile_ips | sed -n "1,12p"
 
   echo "--- membership checks ---"
-  ipset test k3s_hostile_ips 1.2.3.4   && echo "  1.2.3.4       blocked (expected)"
-  ipset test k3s_hostile_ips 5.6.7.9   && echo "  5.6.7.9       in 5.6.7.0/24 (expected)"
-  if ipset test k3s_hostile_ips 9.9.9.9 2>/dev/null; then
+  ipset test threat_engine_hostile_ips 1.2.3.4   && echo "  1.2.3.4       blocked (expected)"
+  ipset test threat_engine_hostile_ips 5.6.7.9   && echo "  5.6.7.9       in 5.6.7.0/24 (expected)"
+  if ipset test threat_engine_hostile_ips 9.9.9.9 2>/dev/null; then
     echo "  9.9.9.9       UNEXPECTEDLY blocked"; exit 1
   else
     echo "  9.9.9.9       not blocked (expected)"
   fi
 
   echo "--- whitelist set ---"
-  ipset test k3s_whitelist_ips 10.1.2.3 && echo "  10.1.2.3      whitelisted (expected)"
+  ipset test threat_engine_whitelist_ips 10.1.2.3 && echo "  10.1.2.3      whitelisted (expected)"
 
   echo "--- no IPv6 may have leaked into either set ---"
-  for s in k3s_hostile_ips k3s_whitelist_ips; do
+  for s in threat_engine_hostile_ips threat_engine_whitelist_ips; do
     # Only the MEMBERS matter. The header lines legitimately contain colons
     # ("Type: hash:net", "Header: family inet ..."), so grep the members
     # section that follows "Members:".

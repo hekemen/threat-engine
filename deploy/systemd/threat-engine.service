@@ -1,13 +1,13 @@
 [Unit]
-Description=K3s Threat Engine (ipset/iptables blocklist daemon)
-Documentation=https://github.com/hekemen/thread-engine
+Description=Threat Engine (ipset/iptables blocklist daemon)
+Documentation=https://github.com/hekemen/threat-engine
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/threat-engine
-EnvironmentFile=-/etc/thread-engine/thread-engine.env
+EnvironmentFile=-/etc/threat-engine/threat-engine.env
 
 # The daemon manipulates the host's netfilter tables, so it needs the two
 # network capabilities rather than a fully privileged service.

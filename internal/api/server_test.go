@@ -10,11 +10,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hekemen/thread-engine/internal/api"
-	"github.com/hekemen/thread-engine/internal/enforcement"
-	"github.com/hekemen/thread-engine/internal/ipset"
-	"github.com/hekemen/thread-engine/internal/iptables"
-	"github.com/hekemen/thread-engine/internal/metrics"
+	"github.com/hekemen/threat-engine/internal/api"
+	"github.com/hekemen/threat-engine/internal/enforcement"
+	"github.com/hekemen/threat-engine/internal/ipset"
+	"github.com/hekemen/threat-engine/internal/iptables"
+	"github.com/hekemen/threat-engine/internal/metrics"
 )
 
 func adminServer(enabled bool) (*api.Server, *enforcement.Controller) {

@@ -11,15 +11,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/hekemen/thread-engine/internal/runner"
+	"github.com/hekemen/threat-engine/internal/runner"
 )
 
 // ChainName is the custom chain this daemon owns in the raw table.
 const ChainName = "THREAD_ENGINE_FILTER"
-
-// LegacyChainName is the chain's previous name, kept only so an in-place
-// upgrade can remove a leftover chain. See CleanupLegacy.
-const LegacyChainName = "K3S_THREAT_FILTER"
 
 // Enforcer reconciles the daemon's iptables chain.
 type Enforcer struct {
@@ -75,30 +71,6 @@ func (e *Enforcer) Attach(ctx context.Context) error {
 func (e *Enforcer) IsAttached(ctx context.Context) bool {
 	_, err := e.Exec(ctx, nil, "iptables", "-t", "raw", "-C", "PREROUTING", "-j", ChainName)
 	return err == nil
-}
-
-// CleanupLegacy removes a chain left behind by the pre-rename version of this
-// daemon. The chain was called K3S_THREAT_FILTER before it became
-// THREAD_ENGINE_FILTER, and an upgrade in place leaves the old chain hooked
-// into raw:PREROUTING, where it keeps dropping packets that the new binary
-// knows nothing about.
-//
-// This is the one place the daemon deletes a chain it did not create, so the
-// blast radius is kept as small as possible: every command stays in the raw
-// table, the jump is only deleted after `-C` confirms it is present, and an
-// absent chain is success. Call it once at startup; it is a no-op otherwise.
-func (e *Enforcer) CleanupLegacy(ctx context.Context) error {
-	if _, err := e.Exec(ctx, nil, "iptables", "-t", "raw", "-C", "PREROUTING", "-j", LegacyChainName); err == nil {
-		if _, err := e.Exec(ctx, nil, "iptables", "-t", "raw", "-D", "PREROUTING", "-j", LegacyChainName); err != nil {
-			return fmt.Errorf("failed unlinking legacy chain %s from PREROUTING: %v", LegacyChainName, err)
-		}
-	}
-
-	// The chain can exist without a jump, so always attempt flush and delete.
-	// Errors are ignored: an absent chain means the goal state already holds.
-	_, _ = e.Exec(ctx, nil, "iptables", "-t", "raw", "-F", LegacyChainName)
-	_, _ = e.Exec(ctx, nil, "iptables", "-t", "raw", "-X", LegacyChainName)
-	return nil
 }
 
 // Detach removes the chain and its PREROUTING jump, returning the host's

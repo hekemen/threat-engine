@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/hekemen/thread-engine/internal/metrics"
+	"github.com/hekemen/threat-engine/internal/metrics"
 )
 
 func TestRecordScanSuccessAndFailure(t *testing.T) {

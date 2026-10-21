@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hekemen/thread-engine/internal/enforcement"
-	"github.com/hekemen/thread-engine/internal/ipset"
-	"github.com/hekemen/thread-engine/internal/metrics"
+	"github.com/hekemen/threat-engine/internal/enforcement"
+	"github.com/hekemen/threat-engine/internal/ipset"
+	"github.com/hekemen/threat-engine/internal/metrics"
 )
 
 // Server holds the dependencies the handlers read from.

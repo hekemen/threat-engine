@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hekemen/thread-engine/internal/ipset"
-	"github.com/hekemen/thread-engine/internal/runner"
+	"github.com/hekemen/threat-engine/internal/ipset"
+	"github.com/hekemen/threat-engine/internal/runner"
 )
 
 type recordedCall struct {
@@ -33,8 +33,8 @@ func fakeExec(calls *[]recordedCall, err error) runner.RunnerFn {
 func TestSyncBuildsAtomicSwapScript(t *testing.T) {
 	var calls []recordedCall
 	m := &ipset.Manager{
-		HostileSetName:   "k3s_hostile_ips",
-		WhitelistSetName: "k3s_whitelist_ips",
+		HostileSetName:   "threat_engine_hostile_ips",
+		WhitelistSetName: "threat_engine_whitelist_ips",
 		Whitelist:        []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
 		Exec:             fakeExec(&calls, nil),
 	}
@@ -45,19 +45,19 @@ func TestSyncBuildsAtomicSwapScript(t *testing.T) {
 		t.Fatalf("expected single 'ipset restore' call, got %+v", calls)
 	}
 	want := strings.Join([]string{
-		"create k3s_hostile_ips hash:net family inet maxelem 300000 -exist",
-		"create k3s_whitelist_ips hash:net family inet maxelem 50000 -exist",
-		"create k3s_whitelist_ips_tmp hash:net family inet maxelem 50000 -exist",
-		"flush k3s_whitelist_ips_tmp",
-		"add k3s_whitelist_ips_tmp 10.0.0.0/8 -exist",
-		"swap k3s_whitelist_ips_tmp k3s_whitelist_ips",
-		"destroy k3s_whitelist_ips_tmp",
-		"create k3s_hostile_ips_tmp hash:net family inet maxelem 300000 -exist",
-		"flush k3s_hostile_ips_tmp",
-		"add k3s_hostile_ips_tmp 1.2.3.4 -exist",
-		"add k3s_hostile_ips_tmp 5.6.7.0/24 -exist",
-		"swap k3s_hostile_ips_tmp k3s_hostile_ips",
-		"destroy k3s_hostile_ips_tmp",
+		"create threat_engine_hostile_ips hash:net family inet maxelem 300000 -exist",
+		"create threat_engine_whitelist_ips hash:net family inet maxelem 50000 -exist",
+		"create threat_engine_whitelist_ips_tmp hash:net family inet maxelem 50000 -exist",
+		"flush threat_engine_whitelist_ips_tmp",
+		"add threat_engine_whitelist_ips_tmp 10.0.0.0/8 -exist",
+		"swap threat_engine_whitelist_ips_tmp threat_engine_whitelist_ips",
+		"destroy threat_engine_whitelist_ips_tmp",
+		"create threat_engine_hostile_ips_tmp hash:net family inet maxelem 300000 -exist",
+		"flush threat_engine_hostile_ips_tmp",
+		"add threat_engine_hostile_ips_tmp 1.2.3.4 -exist",
+		"add threat_engine_hostile_ips_tmp 5.6.7.0/24 -exist",
+		"swap threat_engine_hostile_ips_tmp threat_engine_hostile_ips",
+		"destroy threat_engine_hostile_ips_tmp",
 		"",
 	}, "\n")
 	if calls[0].stdin != want {

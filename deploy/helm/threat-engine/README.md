@@ -1,6 +1,6 @@
-# thread-engine Helm chart
+# threat-engine Helm chart
 
-Deploys [thread-engine](../../../README.md) as a DaemonSet: one pod per node,
+Deploys [threat-engine](../../../README.md) as a DaemonSet: one pod per node,
 polling multi-source threat feeds, populating kernel `ipset` tables, and
 optionally dropping hostile packets in `raw:PREROUTING`.
 
@@ -18,13 +18,13 @@ but attaches no iptables rules, so it cannot affect existing traffic.
 ## Install
 
 ```bash
-helm install thread-engine ./deploy/helm/thread-engine
+helm install threat-engine ./deploy/helm/threat-engine
 ```
 
 Enforcement stays disabled. To enable it for every node from the start:
 
 ```bash
-helm install thread-engine ./deploy/helm/thread-engine --set enforcement.enabled=true
+helm install threat-engine ./deploy/helm/threat-engine --set enforcement.enabled=true
 ```
 
 ## Key values
@@ -32,8 +32,8 @@ helm install thread-engine ./deploy/helm/thread-engine --set enforcement.enabled
 | Value | Default | Description |
 | :--- | :--- | :--- |
 | `enforcement.enabled` | `false` | Attach the hostile DROP rules to `raw:PREROUTING`. |
-| `sets.hostileName` | `k3s_hostile_ips` | Kernel ipset name for blocked targets. |
-| `sets.whitelistName` | `k3s_whitelist_ips` | Kernel ipset name for allowed targets. |
+| `sets.hostileName` | `threat_engine_hostile_ips` | Kernel ipset name for blocked targets. |
+| `sets.whitelistName` | `threat_engine_whitelist_ips` | Kernel ipset name for allowed targets. |
 | `scan.intervalMinutes` | `5` | Feed polling frequency. |
 | `scan.confidenceThreshold` | `3` | Minimum score for confidence-weighted feeds. |
 | `whitelist` | `[]` | Extra IPs/CIDRs to never block. |
@@ -52,7 +52,7 @@ node or from inside the pod — never from another pod or off-host. Reach it wit
 `kubectl port-forward` (or `kubectl exec`):
 
 ```bash
-kubectl port-forward daemonset/thread-engine-thread-engine 9091:9091
+kubectl port-forward daemonset/threat-engine-threat-engine 9091:9091
 
 # enable
 curl -s -X POST 'http://127.0.0.1:9091/enforcement?enabled=true'
@@ -80,7 +80,7 @@ curl -s http://127.0.0.1:9090/metrics | grep threat_engine_enforcement_enabled
 On a node, inspect the kernel directly:
 
 ```bash
-sudo ipset list k3s_hostile_ips -terse
+sudo ipset list threat_engine_hostile_ips -terse
 sudo iptables -t raw -L THREAD_ENGINE_FILTER -v -n
 sudo iptables -t raw -C PREROUTING -j THREAD_ENGINE_FILTER   # exit 0 when attached
 ```
@@ -94,7 +94,7 @@ so prefer scraping all pods rather than aggregating through one Service endpoint
 ## Uninstall
 
 ```bash
-helm uninstall thread-engine
+helm uninstall threat-engine
 ```
 
 Uninstalling removes the pods but **leaves the kernel state behind**, because
@@ -104,8 +104,8 @@ Uninstalling removes the pods but **leaves the kernel state behind**, because
 sudo iptables -t raw -D PREROUTING -j THREAD_ENGINE_FILTER
 sudo iptables -t raw -F THREAD_ENGINE_FILTER
 sudo iptables -t raw -X THREAD_ENGINE_FILTER
-sudo ipset destroy k3s_hostile_ips
-sudo ipset destroy k3s_whitelist_ips
+sudo ipset destroy threat_engine_hostile_ips
+sudo ipset destroy threat_engine_whitelist_ips
 ```
 
 Run those on every node that hosted a pod.

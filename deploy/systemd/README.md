@@ -1,4 +1,4 @@
-# Running thread-engine as a systemd service
+# Running threat-engine as a systemd service
 
 For a single host (or any node you manage directly) the daemon can run under
 systemd instead of Kubernetes. It needs root-equivalent network administration
@@ -16,7 +16,7 @@ sudo modprobe ip_set ip_set_hash_net xt_set
 To make that survive a reboot, add them to `/etc/modules-load.d/`:
 
 ```bash
-printf 'ip_set\nip_set_hash_net\nxt_set\n' | sudo tee /etc/modules-load.d/thread-engine.conf
+printf 'ip_set\nip_set_hash_net\nxt_set\n' | sudo tee /etc/modules-load.d/threat-engine.conf
 ```
 
 ## Install
@@ -33,26 +33,26 @@ printf 'ip_set\nip_set_hash_net\nxt_set\n' | sudo tee /etc/modules-load.d/thread
 2. Install the unit and environment file:
 
    ```bash
-   sudo install -m 0644 deploy/systemd/thread-engine.service /etc/systemd/system/thread-engine.service
-   sudo install -d -m 0755 /etc/thread-engine
-   sudo install -m 0644 deploy/systemd/thread-engine.env.example /etc/thread-engine/thread-engine.env
+   sudo install -m 0644 deploy/systemd/threat-engine.service /etc/systemd/system/threat-engine.service
+   sudo install -d -m 0755 /etc/threat-engine
+   sudo install -m 0644 deploy/systemd/threat-engine.env.example /etc/threat-engine/threat-engine.env
    ```
 
-3. Edit `/etc/thread-engine/thread-engine.env`. Enforcement is `false` by
+3. Edit `/etc/threat-engine/threat-engine.env`. Enforcement is `false` by
    default, so the service starts safely without filtering anything.
 
 4. Start it:
 
    ```bash
    sudo systemctl daemon-reload
-   sudo systemctl enable --now thread-engine
+   sudo systemctl enable --now threat-engine
    ```
 
 ## Verify
 
 ```bash
-systemctl status thread-engine
-journalctl -u thread-engine -n 50 --no-pager
+systemctl status threat-engine
+journalctl -u threat-engine -n 50 --no-pager
 ```
 
 The startup log states the enforcement mode explicitly, e.g.
@@ -69,7 +69,7 @@ curl -s 'http://127.0.0.1:9090/check?ip=1.2.3.4'
 Inspect the kernel state:
 
 ```bash
-sudo ipset list k3s_hostile_ips -terse
+sudo ipset list threat_engine_hostile_ips -terse
 sudo iptables -t raw -L THREAD_ENGINE_FILTER -v -n
 ```
 
@@ -88,14 +88,14 @@ curl -s -X POST 'http://127.0.0.1:9091/enforcement?enabled=false'  # detach rule
 
 Changes apply immediately; no restart is needed. To change the startup default
 instead, set `ENFORCEMENT_ENABLED=true` in the env file and
-`systemctl restart thread-engine`.
+`systemctl restart threat-engine`.
 
 ## Uninstall
 
 ```bash
-sudo systemctl disable --now thread-engine
-sudo rm /etc/systemd/system/thread-engine.service
-sudo rm -rf /etc/thread-engine
+sudo systemctl disable --now threat-engine
+sudo rm /etc/systemd/system/threat-engine.service
+sudo rm -rf /etc/threat-engine
 sudo systemctl daemon-reload
 ```
 
@@ -106,6 +106,6 @@ on, remove the rules and tables:
 sudo iptables -t raw -D PREROUTING -j THREAD_ENGINE_FILTER
 sudo iptables -t raw -F THREAD_ENGINE_FILTER
 sudo iptables -t raw -X THREAD_ENGINE_FILTER
-sudo ipset destroy k3s_hostile_ips
-sudo ipset destroy k3s_whitelist_ips
+sudo ipset destroy threat_engine_hostile_ips
+sudo ipset destroy threat_engine_whitelist_ips
 ```

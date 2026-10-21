@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hekemen/thread-engine/internal/iptables"
-	"github.com/hekemen/thread-engine/internal/runner"
+	"github.com/hekemen/threat-engine/internal/iptables"
+	"github.com/hekemen/threat-engine/internal/runner"
 )
 
 type call struct {
@@ -35,77 +35,6 @@ func callLines(calls []call) []string {
 	return out
 }
 
-func TestCleanupLegacyChainRemovesOldName(t *testing.T) {
-	// The chain was renamed from K3S_THREAT_FILTER to THREAD_ENGINE_FILTER.
-	// A host upgrading in place still has the old chain hooked into
-	// raw:PREROUTING, where it keeps dropping packets. Startup must remove it.
-	var calls []call
-	e := &iptables.Enforcer{
-		HostileSetName:   "k3s_hostile_ips",
-		WhitelistSetName: "k3s_whitelist_ips",
-		// An empty fail map means every command succeeds, which is how
-		// `iptables -C` signals "the jump is present".
-		Exec: scriptedExec(&calls, map[string]bool{}),
-	}
-	if err := e.CleanupLegacy(context.Background()); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	want := []string{
-		"iptables -t raw -C PREROUTING -j K3S_THREAT_FILTER",
-		"iptables -t raw -D PREROUTING -j K3S_THREAT_FILTER",
-		"iptables -t raw -F K3S_THREAT_FILTER",
-		"iptables -t raw -X K3S_THREAT_FILTER",
-	}
-	got := callLines(calls)
-	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("legacy cleanup sequence mismatch:\ngot:\n%s\nwant:\n%s",
-			strings.Join(got, "\n"), strings.Join(want, "\n"))
-	}
-}
-
-func TestCleanupLegacyChainNoopWhenAbsent(t *testing.T) {
-	// Nothing to remove must be success, so a fresh install does not fail
-	// or log an error on every start.
-	var calls []call
-	e := &iptables.Enforcer{
-		HostileSetName: "k3s_hostile_ips", WhitelistSetName: "k3s_whitelist_ips",
-		Exec: scriptedExec(&calls, map[string]bool{
-			"-t raw -C PREROUTING -j K3S_THREAT_FILTER": true, // no jump
-			"-t raw -F K3S_THREAT_FILTER":               true, // no chain
-			"-t raw -X K3S_THREAT_FILTER":               true,
-		}),
-	}
-	if err := e.CleanupLegacy(context.Background()); err != nil {
-		t.Fatalf("absent legacy chain must not be an error: %v", err)
-	}
-	// It must not delete the jump it never confirmed.
-	for _, line := range callLines(calls) {
-		if strings.Contains(line, "-D PREROUTING") {
-			t.Fatalf("must not delete a jump that is not present: %q", line)
-		}
-	}
-}
-
-func TestCleanupLegacyOnlyTouchesRawTable(t *testing.T) {
-	// Safety: the daemon removes a chain it did not create. Every command
-	// must stay in the raw table so no other table can be affected.
-	var calls []call
-	e := &iptables.Enforcer{
-		HostileSetName: "k3s_hostile_ips", WhitelistSetName: "k3s_whitelist_ips",
-		Exec: scriptedExec(&calls, map[string]bool{
-			"-t raw -C PREROUTING -j K3S_THREAT_FILTER": true, // jump absent
-		}),
-	}
-	if err := e.CleanupLegacy(context.Background()); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	for _, c := range calls {
-		if c.args[0] != "-t" || c.args[1] != "raw" {
-			t.Fatalf("every legacy cleanup command must use -t raw: %v", c.args)
-		}
-	}
-}
-
 func TestChainNameIsThreadEngineFilter(t *testing.T) {
 	if iptables.ChainName != "THREAD_ENGINE_FILTER" {
 		t.Fatalf("ChainName = %q, want THREAD_ENGINE_FILTER", iptables.ChainName)
@@ -115,8 +44,8 @@ func TestChainNameIsThreadEngineFilter(t *testing.T) {
 func TestEnsureChainExactSequence(t *testing.T) {
 	var calls []call
 	e := &iptables.Enforcer{
-		HostileSetName:   "k3s_hostile_ips",
-		WhitelistSetName: "k3s_whitelist_ips",
+		HostileSetName:   "threat_engine_hostile_ips",
+		WhitelistSetName: "threat_engine_whitelist_ips",
 		Exec: scriptedExec(&calls, map[string]bool{
 			"-t raw -N THREAD_ENGINE_FILTER":               true, // chain already exists
 			"-t raw -C PREROUTING -j THREAD_ENGINE_FILTER": true, // jump missing → insert
@@ -130,8 +59,8 @@ func TestEnsureChainExactSequence(t *testing.T) {
 		"iptables -t raw -C PREROUTING -j THREAD_ENGINE_FILTER",
 		"iptables -t raw -I PREROUTING 1 -j THREAD_ENGINE_FILTER",
 		"iptables -t raw -F THREAD_ENGINE_FILTER",
-		"iptables -t raw -A THREAD_ENGINE_FILTER -m set --match-set k3s_whitelist_ips src -j RETURN",
-		"iptables -t raw -A THREAD_ENGINE_FILTER -m set --match-set k3s_hostile_ips src -j DROP",
+		"iptables -t raw -A THREAD_ENGINE_FILTER -m set --match-set threat_engine_whitelist_ips src -j RETURN",
+		"iptables -t raw -A THREAD_ENGINE_FILTER -m set --match-set threat_engine_hostile_ips src -j DROP",
 	}
 	if len(calls) != len(want) {
 		t.Fatalf("got %d calls: %+v", len(calls), calls)
@@ -151,7 +80,7 @@ func TestAttachDoesNotFlushWhenAlreadyAttached(t *testing.T) {
 	// that window would recur on every scan. Attach must be a no-op then.
 	var calls []call
 	e := &iptables.Enforcer{
-		HostileSetName: "k3s_hostile_ips", WhitelistSetName: "k3s_whitelist_ips",
+		HostileSetName: "threat_engine_hostile_ips", WhitelistSetName: "threat_engine_whitelist_ips",
 		Exec: scriptedExec(&calls, nil),
 	}
 	if err := e.Attach(context.Background()); err != nil {
@@ -219,7 +148,7 @@ func TestEnsureChainRuleErrorFatal(t *testing.T) {
 func TestDetachRemovesJumpAndChain(t *testing.T) {
 	var calls []call
 	e := &iptables.Enforcer{
-		HostileSetName: "k3s_hostile_ips", WhitelistSetName: "k3s_whitelist_ips",
+		HostileSetName: "threat_engine_hostile_ips", WhitelistSetName: "threat_engine_whitelist_ips",
 		Exec: scriptedExec(&calls, nil), // everything succeeds ⇒ -C reports the jump IS present
 	}
 	if err := e.Detach(context.Background()); err != nil {
@@ -243,7 +172,7 @@ func TestDetachRemovesJumpAndChain(t *testing.T) {
 	}
 	// Detach must never touch the ipset tables.
 	for _, c := range calls {
-		if line := strings.Join(c.args, " "); strings.Contains(line, "k3s_hostile_ips") || strings.Contains(line, "k3s_whitelist_ips") {
+		if line := strings.Join(c.args, " "); strings.Contains(line, "threat_engine_hostile_ips") || strings.Contains(line, "threat_engine_whitelist_ips") {
 			t.Fatalf("Detach must not touch ipset tables, got %q", line)
 		}
 	}

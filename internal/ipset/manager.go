@@ -15,7 +15,7 @@ import (
 	"net/netip"
 	"strings"
 
-	"github.com/hekemen/thread-engine/internal/runner"
+	"github.com/hekemen/threat-engine/internal/runner"
 )
 
 // Manager reconciles the host's ipset tables.
@@ -80,8 +80,8 @@ func (m *Manager) Sync(ctx context.Context, entries []string) error {
 
 // EnsureSets creates both kernel sets if they are not already there, leaving
 // their contents untouched. It exists because the enforcement rules reference
-// these sets: `iptables -A ... --match-set k3s_hostile_ips` fails outright
-// while the set is missing ("Set k3s_hostile_ips doesn't exist"), and on a
+// these sets: `iptables -A ... --match-set threat_engine_hostile_ips` fails outright
+// while the set is missing ("Set threat_engine_hostile_ips doesn't exist"), and on a
 // cold start nothing has created them yet.
 //
 // Sync also creates them, but Sync runs behind the scan's change guard, so the

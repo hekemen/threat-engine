@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hekemen/thread-engine/internal/config"
+	"github.com/hekemen/threat-engine/internal/config"
 )
 
 func prefixSet(list []netip.Prefix) map[netip.Prefix]bool {
@@ -18,7 +18,7 @@ func prefixSet(list []netip.Prefix) map[netip.Prefix]bool {
 
 func TestLoadDefaults(t *testing.T) {
 	c := config.Load()
-	if c.HostileSetName != "k3s_hostile_ips" || c.WhitelistSetName != "k3s_whitelist_ips" {
+	if c.HostileSetName != "threat_engine_hostile_ips" || c.WhitelistSetName != "threat_engine_whitelist_ips" {
 		t.Fatalf("set names wrong: %+v", c)
 	}
 	if c.HTTPPort != "9090" || c.ScanInterval != 5*time.Minute {

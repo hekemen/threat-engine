@@ -14,10 +14,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/hekemen/thread-engine/internal/adapters"
-	"github.com/hekemen/thread-engine/internal/enforcement"
-	"github.com/hekemen/thread-engine/internal/ipset"
-	"github.com/hekemen/thread-engine/internal/metrics"
+	"github.com/hekemen/threat-engine/internal/adapters"
+	"github.com/hekemen/threat-engine/internal/enforcement"
+	"github.com/hekemen/threat-engine/internal/ipset"
+	"github.com/hekemen/threat-engine/internal/metrics"
 )
 
 // Engine owns the scan-reconcile pipeline. Every collaborator is injected so

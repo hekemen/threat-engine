@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hekemen/thread-engine/internal/runner"
+	"github.com/hekemen/threat-engine/internal/runner"
 )
 
 func TestOSPassesStdinAndReturnsCombinedOutput(t *testing.T) {

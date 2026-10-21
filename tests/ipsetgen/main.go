@@ -14,7 +14,7 @@ import (
 	"net/netip"
 	"os"
 
-	"github.com/hekemen/thread-engine/internal/ipset"
+	"github.com/hekemen/threat-engine/internal/ipset"
 )
 
 // capture is an Exec that records the stdin Sync would hand to `ipset`.
@@ -35,8 +35,8 @@ func main() {
 	// scan) plus hostile entries covering IPv4, IPv4 CIDR, IPv6, and an IPv6
 	// prefix. The IPv6 entries must not appear in the output at all.
 	m := &ipset.Manager{
-		HostileSetName:   "k3s_hostile_ips",
-		WhitelistSetName: "k3s_whitelist_ips",
+		HostileSetName:   "threat_engine_hostile_ips",
+		WhitelistSetName: "threat_engine_whitelist_ips",
 		Whitelist: []netip.Prefix{
 			netip.MustParsePrefix("127.0.0.0/8"),
 			netip.MustParsePrefix("10.0.0.0/8"),

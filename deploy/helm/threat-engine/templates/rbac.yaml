@@ -8,25 +8,25 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "thread-engine.fullname" . }}
+  name: {{ include "threat-engine.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "thread-engine.labels" . | nindent 4 }}
+    {{- include "threat-engine.labels" . | nindent 4 }}
 rules: []
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "thread-engine.fullname" . }}
+  name: {{ include "threat-engine.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "thread-engine.labels" . | nindent 4 }}
+    {{- include "threat-engine.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ include "thread-engine.fullname" . }}
+  name: {{ include "threat-engine.fullname" . }}
 subjects:
   - kind: ServiceAccount
-    name: {{ include "thread-engine.serviceAccountName" . }}
+    name: {{ include "threat-engine.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 {{- end }}

@@ -1,20 +1,20 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: {{ include "thread-engine.fullname" . }}
+  name: {{ include "threat-engine.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "thread-engine.labels" . | nindent 4 }}
+    {{- include "threat-engine.labels" . | nindent 4 }}
 spec:
   selector:
     matchLabels:
-      {{- include "thread-engine.selectorLabels" . | nindent 6 }}
+      {{- include "threat-engine.selectorLabels" . | nindent 6 }}
   updateStrategy:
     {{- toYaml .Values.updateStrategy | nindent 4 }}
   template:
     metadata:
       labels:
-        {{- include "thread-engine.labels" . | nindent 8 }}
+        {{- include "threat-engine.labels" . | nindent 8 }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -30,7 +30,7 @@ spec:
       # networking it would firewall the pod's own namespace and nothing else.
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
-      serviceAccountName: {{ include "thread-engine.serviceAccountName" . }}
+      serviceAccountName: {{ include "threat-engine.serviceAccountName" . }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -41,8 +41,8 @@ spec:
         runAsUser: 0
         runAsNonRoot: false
       containers:
-        - name: thread-engine
-          image: {{ include "thread-engine.image" . | quote }}
+        - name: threat-engine
+          image: {{ include "threat-engine.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             capabilities:

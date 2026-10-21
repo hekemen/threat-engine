@@ -1,4 +1,4 @@
-# thread-engine
+# threat-engine
 
 An autonomous threat-intelligence daemon that polls multi-source IP blocklists,
 detects changes with SHA-256 fingerprinting, and enforces sub-millisecond packet
@@ -57,7 +57,7 @@ curl -s 'http://127.0.0.1:9090/check?ip=92.118.39.229'
 #    "enforcement_enabled":true,"timestamp":"..."}
 
 # Blocklist size, regardless of enforcement mode
-sudo ipset list k3s_hostile_ips -terse
+sudo ipset list threat_engine_hostile_ips -terse
 
 # The chain and jump exist ONLY while enforcement is on
 sudo iptables -t raw -S | grep THREAD_ENGINE_FILTER
@@ -78,21 +78,24 @@ blocklist it received. To clear it by hand:
 sudo iptables -t raw -D PREROUTING -j THREAD_ENGINE_FILTER
 sudo iptables -t raw -F THREAD_ENGINE_FILTER
 sudo iptables -t raw -X THREAD_ENGINE_FILTER
-sudo ipset destroy k3s_hostile_ips
-sudo ipset destroy k3s_whitelist_ips
+sudo ipset destroy threat_engine_hostile_ips
+sudo ipset destroy threat_engine_whitelist_ips
 ```
 
-### Upgrading from a build that used `K3S_THREAT_FILTER`
+### Upgrading from a pre-rename build
 
-The chain was renamed to `THREAD_ENGINE_FILTER`. On startup the daemon removes a
-leftover `K3S_THREAT_FILTER` chain and its jump, in the `raw` table only, so an
-in-place upgrade does not leave the old chain dropping traffic. If you prefer to
-do it yourself first:
+Earlier builds used the chain name `K3S_THREAT_FILTER` and the kernel set names
+`k3s_hostile_ips` / `k3s_whitelist_ips`. The daemon no longer removes old-name
+kernel state on startup — run this once by hand after upgrading:
 
 ```bash
 sudo iptables -t raw -D PREROUTING -j K3S_THREAT_FILTER 2>/dev/null
 sudo iptables -t raw -F K3S_THREAT_FILTER 2>/dev/null
 sudo iptables -t raw -X K3S_THREAT_FILTER 2>/dev/null
+sudo ipset destroy k3s_hostile_ips_tmp 2>/dev/null
+sudo ipset destroy k3s_hostile_ips 2>/dev/null
+sudo ipset destroy k3s_whitelist_ips_tmp 2>/dev/null
+sudo ipset destroy k3s_whitelist_ips 2>/dev/null
 ```
 
 ## Deployment
@@ -108,11 +111,11 @@ sudo modprobe ip_set ip_set_hash_net xt_set
 ### 1. Direct binary
 
 ```bash
-go install github.com/hekemen/thread-engine/cmd@latest
+go install github.com/hekemen/threat-engine/cmd@latest
 ```
 
 > **Caveat:** `go install` requires the module to be published and fetchable at
-> that path. If `github.com/hekemen/thread-engine` is not yet available publicly
+> that path. If `github.com/hekemen/threat-engine` is not yet available publicly
 > (or the requested version is not tagged), this command fails with a
 > "module ... not found" error. This is the expected failure, not a broken
 > command.
@@ -120,8 +123,8 @@ go install github.com/hekemen/thread-engine/cmd@latest
 **The always-works fallback** — clone and build:
 
 ```bash
-git clone https://github.com/hekemen/thread-engine.git
-cd thread-engine
+git clone https://github.com/hekemen/threat-engine.git
+cd threat-engine
 CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o threat-engine ./cmd
 sudo install -m 0755 threat-engine /usr/local/bin/threat-engine
 ```
@@ -137,10 +140,10 @@ sudo /usr/local/bin/threat-engine
 The image is a static Go binary on Alpine.
 
 ```bash
-docker build -t k3s-threat-engine:local .
+docker build -t threat-engine:local .
 
 docker run -d \
-  --name k3s-threat-engine \
+  --name threat-engine \
   --restart unless-stopped \
   --net=host \
   --cap-add=NET_ADMIN \
@@ -148,7 +151,7 @@ docker run -d \
   -e INTERVAL_MINUTES=5 \
   -e ENFORCEMENT_ENABLED=false \
   -e WHITELIST="203.0.113.10" \
-  k3s-threat-engine:local
+  threat-engine:local
 ```
 
 Or with the included [`docker-compose.yaml`](docker-compose.yaml):
@@ -162,16 +165,16 @@ not a container-local namespace.
 
 ### 3. Kubernetes / Helm
 
-See [`deploy/helm/thread-engine`](deploy/helm/thread-engine) for the DaemonSet
+See [`deploy/helm/threat-engine`](deploy/helm/threat-engine) for the DaemonSet
 chart (`enforcement.enabled` defaults to `false`):
 
 ```bash
-helm install thread-engine ./deploy/helm/thread-engine
-helm install thread-engine ./deploy/helm/thread-engine --set enforcement.enabled=true
+helm install threat-engine ./deploy/helm/threat-engine
+helm install threat-engine ./deploy/helm/threat-engine --set enforcement.enabled=true
 ```
 
 The chart sets `hostNetwork: true`, `dnsPolicy: ClusterFirstWithHostNet`, and the
-two capabilities. See its [README](deploy/helm/thread-engine/README.md) for the
+two capabilities. See its [README](deploy/helm/threat-engine/README.md) for the
 full value list and the runtime toggle instructions.
 
 ### 4. systemd
@@ -179,10 +182,10 @@ full value list and the runtime toggle instructions.
 See [`deploy/systemd`](deploy/systemd) for a hardened unit and environment file:
 
 ```bash
-sudo install -m 0644 deploy/systemd/thread-engine.service /etc/systemd/system/
-sudo install -d /etc/thread-engine
-sudo install -m 0644 deploy/systemd/thread-engine.env.example /etc/thread-engine/thread-engine.env
-sudo systemctl daemon-reload && sudo systemctl enable --now thread-engine
+sudo install -m 0644 deploy/systemd/threat-engine.service /etc/systemd/system/
+sudo install -d /etc/threat-engine
+sudo install -m 0644 deploy/systemd/threat-engine.env.example /etc/threat-engine/threat-engine.env
+sudo systemctl daemon-reload && sudo systemctl enable --now threat-engine
 ```
 
 The unit deliberately omits `ProtectKernelModules`, which would block the
@@ -198,8 +201,8 @@ All settings are environment variables.
 | `INTERVAL_MINUTES` | `5` | Feed polling frequency. |
 | `HTTP_PORT` | `9090` | Read-only listener for `/healthz`, `/check`, `/metrics`. |
 | `ADMIN_PORT` | `9091` | Loopback-only (`127.0.0.1`) toggle listener. |
-| `HOSTILE_SET_NAME` | `k3s_hostile_ips` | Kernel `ipset` name for blocked IPs/CIDRs. |
-| `WHITELIST_SET_NAME` | `k3s_whitelist_ips` | Kernel `ipset` name for allowed IPs/CIDRs. |
+| `HOSTILE_SET_NAME` | `threat_engine_hostile_ips` | Kernel `ipset` name for blocked IPs/CIDRs. |
+| `WHITELIST_SET_NAME` | `threat_engine_whitelist_ips` | Kernel `ipset` name for allowed IPs/CIDRs. |
 | `WHITELIST` | `""` | Comma-separated extra IPs/CIDRs to never block, e.g. `203.0.113.10,198.51.100.0/24`. |
 | `CONFIDENCE_THRESHOLD` | `3` | Minimum score for confidence-weighted feeds such as IPsum. |
 

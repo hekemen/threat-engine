@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hekemen/thread-engine/internal/adapters"
+	"github.com/hekemen/threat-engine/internal/adapters"
 )
 
 func newClient() *http.Client { return &http.Client{} }
@@ -75,7 +75,7 @@ func TestFetchSendsUserAgent(t *testing.T) {
 	if _, err := (&adapters.LineDelimitedAdapter{FeedName: "x", URL: srv.URL}).Fetch(context.Background(), newClient()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if gotUA != "k3s-threat-engine/2.0" {
+	if gotUA != "threat-engine/2.0" {
 		t.Fatalf("User-Agent = %q", gotUA)
 	}
 }

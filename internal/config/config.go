@@ -5,8 +5,8 @@
 //	INTERVAL_MINUTES     scan interval in minutes (default 5; invalid/zero falls back)
 //	HTTP_PORT            HTTP listen port (default 9090)
 //	ADMIN_PORT           loopback-only admin listen port (default 9091)
-//	HOSTILE_SET_NAME     kernel ipset name for blocked targets (default k3s_hostile_ips)
-//	WHITELIST_SET_NAME   kernel ipset name for allowed targets (default k3s_whitelist_ips)
+//	HOSTILE_SET_NAME     kernel ipset name for blocked targets (default threat_engine_hostile_ips)
+//	WHITELIST_SET_NAME   kernel ipset name for allowed targets (default threat_engine_whitelist_ips)
 //	WHITELIST            comma-separated custom IPs/CIDRs to never block
 //	ENFORCEMENT_ENABLED  attach the kernel drop rules (default false; unparseable falls back to false)
 //
@@ -60,8 +60,8 @@ func defaultPrivateSubnets() []netip.Prefix {
 
 // Load reads the environment and returns the effective configuration.
 func Load() Config {
-	hostileSet := getEnv("HOSTILE_SET_NAME", "k3s_hostile_ips")
-	whitelistSet := getEnv("WHITELIST_SET_NAME", "k3s_whitelist_ips")
+	hostileSet := getEnv("HOSTILE_SET_NAME", "threat_engine_hostile_ips")
+	whitelistSet := getEnv("WHITELIST_SET_NAME", "threat_engine_whitelist_ips")
 	port := getEnv("HTTP_PORT", "9090")
 	adminPort := getEnv("ADMIN_PORT", "9091")
 

@@ -9,13 +9,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hekemen/thread-engine/internal/adapters"
-	"github.com/hekemen/thread-engine/internal/enforcement"
-	"github.com/hekemen/thread-engine/internal/engine"
-	"github.com/hekemen/thread-engine/internal/ipset"
-	"github.com/hekemen/thread-engine/internal/iptables"
-	"github.com/hekemen/thread-engine/internal/metrics"
-	"github.com/hekemen/thread-engine/internal/runner"
+	"github.com/hekemen/threat-engine/internal/adapters"
+	"github.com/hekemen/threat-engine/internal/enforcement"
+	"github.com/hekemen/threat-engine/internal/engine"
+	"github.com/hekemen/threat-engine/internal/ipset"
+	"github.com/hekemen/threat-engine/internal/iptables"
+	"github.com/hekemen/threat-engine/internal/metrics"
+	"github.com/hekemen/threat-engine/internal/runner"
 )
 
 type fakeAdapter struct {
@@ -100,7 +100,7 @@ func kernelWithSets(calls *[]kernelCall) runner.RunnerFn {
 
 		if name == "ipset" && strings.Contains(body, "create") {
 			for _, f := range strings.Fields(body) {
-				if strings.HasPrefix(f, "k3s_") && !strings.HasSuffix(f, "_tmp") {
+				if strings.HasPrefix(f, "threat_engine_") && !strings.HasSuffix(f, "_tmp") {
 					sets[f] = true
 				}
 			}
@@ -138,8 +138,8 @@ func newEngine(m *metrics.Metrics, entries []string, exec runner.RunnerFn) *engi
 	return &engine.Engine{
 		Adapters:    []adapters.FeedAdapter{&fakeAdapter{name: "fake", entries: entries}},
 		Whitelist:   whitelist,
-		IPSet:       &ipset.Manager{HostileSetName: "k3s_hostile_ips", WhitelistSetName: "k3s_whitelist_ips", Whitelist: whitelist, Exec: exec},
-		Enforcement: enforcement.New(&iptables.Enforcer{HostileSetName: "k3s_hostile_ips", WhitelistSetName: "k3s_whitelist_ips", Exec: exec}, false),
+		IPSet:       &ipset.Manager{HostileSetName: "threat_engine_hostile_ips", WhitelistSetName: "threat_engine_whitelist_ips", Whitelist: whitelist, Exec: exec},
+		Enforcement: enforcement.New(&iptables.Enforcer{HostileSetName: "threat_engine_hostile_ips", WhitelistSetName: "threat_engine_whitelist_ips", Exec: exec}, false),
 		Metrics:     m,
 		HTTPClient:  &http.Client{},
 	}
@@ -203,7 +203,7 @@ func TestScanAndReconcileSkipsKernelOnUnchangedFingerprint(t *testing.T) {
 	joined := strings.Join(callArgs(calls), "\n")
 	var sawIpsetRestore bool
 	for _, c := range calls {
-		if strings.Contains(c.stdin, "swap k3s_hostile_ips_tmp k3s_hostile_ips") {
+		if strings.Contains(c.stdin, "swap threat_engine_hostile_ips_tmp threat_engine_hostile_ips") {
 			sawIpsetRestore = true
 		}
 	}
@@ -247,7 +247,7 @@ func TestScanPopulatesIpsetsButSkipsIptablesWhenDisabled(t *testing.T) {
 	// probe first.
 	var sawIpsetRestore bool
 	for _, c := range calls {
-		if strings.Contains(c.stdin, "swap k3s_hostile_ips_tmp k3s_hostile_ips") {
+		if strings.Contains(c.stdin, "swap threat_engine_hostile_ips_tmp threat_engine_hostile_ips") {
 			sawIpsetRestore = true
 		}
 	}
@@ -272,7 +272,7 @@ func TestScanAttachesWhenEnforcementEnabled(t *testing.T) {
 	e := newEngine(metrics.New(), []string{"1.2.3.4"}, exec)
 	e.Enforcement.Set(true)
 	e.ScanAndReconcile(context.Background())
-	if !strings.Contains(strings.Join(callArgs(calls), "\n"), "-A THREAD_ENGINE_FILTER -m set --match-set k3s_hostile_ips src -j DROP") {
+	if !strings.Contains(strings.Join(callArgs(calls), "\n"), "-A THREAD_ENGINE_FILTER -m set --match-set threat_engine_hostile_ips src -j DROP") {
 		t.Fatalf("enabled enforcement must attach the chain, got:\n%s", strings.Join(callArgs(calls), "\n"))
 	}
 }
@@ -301,7 +301,7 @@ func TestScanReportsEnforcementFailure(t *testing.T) {
 	rec := &calls
 	e := newEngine(metrics.New(), []string{"1.2.3.4"}, countingExec(&calls, nil))
 	e.Enforcement = enforcement.New(&iptables.Enforcer{
-		HostileSetName: "k3s_hostile_ips", WhitelistSetName: "k3s_whitelist_ips",
+		HostileSetName: "threat_engine_hostile_ips", WhitelistSetName: "threat_engine_whitelist_ips",
 		Exec: func(ctx context.Context, stdin io.Reader, name string, args ...string) (string, error) {
 			*rec = append(*rec, kernelCall{raw: name + " " + strings.Join(args, " ")})
 			// The chain cannot be linked: this is the missing-capability case.
@@ -354,8 +354,8 @@ func TestScanCreatesSetsBeforeAttachingOnColdStart(t *testing.T) {
 
 	joined := strings.Join(callArgs(calls), "\n")
 	for _, want := range []string{
-		"-A THREAD_ENGINE_FILTER -m set --match-set k3s_whitelist_ips src -j RETURN",
-		"-A THREAD_ENGINE_FILTER -m set --match-set k3s_hostile_ips src -j DROP",
+		"-A THREAD_ENGINE_FILTER -m set --match-set threat_engine_whitelist_ips src -j RETURN",
+		"-A THREAD_ENGINE_FILTER -m set --match-set threat_engine_hostile_ips src -j DROP",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("cold start must populate the chain, missing %q in:\n%s", want, joined)
@@ -375,7 +375,7 @@ func TestScanEnsuresSetsOnlyOnce(t *testing.T) {
 	countEnsure := func() int {
 		n := 0
 		for _, c := range calls {
-			if strings.Contains(c.stdin, "create k3s_hostile_ips hash:net") &&
+			if strings.Contains(c.stdin, "create threat_engine_hostile_ips hash:net") &&
 				!strings.Contains(c.stdin, "flush") {
 				n++
 			}

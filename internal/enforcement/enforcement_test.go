@@ -8,8 +8,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/hekemen/thread-engine/internal/enforcement"
-	"github.com/hekemen/thread-engine/internal/iptables"
+	"github.com/hekemen/threat-engine/internal/enforcement"
+	"github.com/hekemen/threat-engine/internal/iptables"
 )
 
 var errNotAttached = errors.New("exit status 1")

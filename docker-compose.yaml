@@ -1,7 +1,7 @@
 services:
   threat-engine:
     build: .
-    container_name: k3s-threat-engine
+    container_name: threat-engine
     restart: unless-stopped
     network_mode: host
     cap_add:

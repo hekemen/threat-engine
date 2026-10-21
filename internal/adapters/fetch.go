@@ -16,7 +16,7 @@ func fetchLines(ctx context.Context, client *http.Client, url string) ([]string,
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "k3s-threat-engine/2.0")
+	req.Header.Set("User-Agent", "threat-engine/2.0")
 
 	resp, err := client.Do(req)
 	if err != nil {

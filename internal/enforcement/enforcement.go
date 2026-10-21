@@ -17,7 +17,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/hekemen/thread-engine/internal/iptables"
+	"github.com/hekemen/threat-engine/internal/iptables"
 )
 
 // Controller holds the enforcement flag and applies it to the kernel.

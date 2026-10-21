@@ -16,21 +16,21 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/hekemen/thread-engine/internal/adapters"
-	"github.com/hekemen/thread-engine/internal/api"
-	"github.com/hekemen/thread-engine/internal/config"
-	"github.com/hekemen/thread-engine/internal/enforcement"
-	"github.com/hekemen/thread-engine/internal/engine"
-	"github.com/hekemen/thread-engine/internal/ipset"
-	"github.com/hekemen/thread-engine/internal/iptables"
-	"github.com/hekemen/thread-engine/internal/metrics"
-	"github.com/hekemen/thread-engine/internal/runner"
+	"github.com/hekemen/threat-engine/internal/adapters"
+	"github.com/hekemen/threat-engine/internal/api"
+	"github.com/hekemen/threat-engine/internal/config"
+	"github.com/hekemen/threat-engine/internal/enforcement"
+	"github.com/hekemen/threat-engine/internal/engine"
+	"github.com/hekemen/threat-engine/internal/ipset"
+	"github.com/hekemen/threat-engine/internal/iptables"
+	"github.com/hekemen/threat-engine/internal/metrics"
+	"github.com/hekemen/threat-engine/internal/runner"
 )
 
 func main() {
 	cfg := config.Load()
 	feeds := adapters.Default()
-	log.Printf("Starting K3s Multi-Source Threat Engine (Scan Interval: %v, Adapters: %d)",
+	log.Printf("Starting Threat Engine (Scan Interval: %v, Adapters: %d)",
 		cfg.ScanInterval, len(feeds))
 
 	m := metrics.New()
@@ -48,14 +48,6 @@ func main() {
 		Exec:             exec,
 	}
 	ctl := enforcement.New(firewall, cfg.EnforcementEnabled)
-
-	// Remove a chain left by the pre-rename version, which is still hooked
-	// into raw:PREROUTING and still dropping packets. Best-effort: a host
-	// without the legacy chain is the normal case, and a failure here must
-	// not stop the daemon from starting.
-	if err := firewall.CleanupLegacy(context.Background()); err != nil {
-		log.Printf("[Cleanup Warning] could not remove legacy %s chain: %v", iptables.LegacyChainName, err)
-	}
 
 	if cfg.EnforcementEnabled {
 		log.Printf("Enforcement: ENABLED — hostile DROP rules will be attached to raw:PREROUTING.")
