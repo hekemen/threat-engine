@@ -21,8 +21,9 @@ printf 'ip_set\nip_set_hash_net\nxt_set\n' | sudo tee /etc/modules-load.d/threat
 
 ## Install
 
-1. Build or install the binary. See the [root README](../../README.md) for the
-   `go install` route and the local-build fallback. The unit expects it at
+1. Build or install the binary. See
+   [docs/operations.md](../../docs/operations.md) for the `go install` route and
+   the local-build fallback. The unit expects it at
    `/usr/local/bin/threat-engine`; if you put it elsewhere, edit `ExecStart`.
 
    ```bash
