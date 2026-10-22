@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"net/netip"
+	"os"
 	"testing"
 	"time"
 
@@ -93,6 +94,59 @@ func TestLoadEnforcementFalsy(t *testing.T) {
 	}
 }
 
+// When ENFORCEMENT_ENABLED is present in the environment at all — even set to
+// "false" — runtime toggles must be locked. The env var (e.g. a Kubernetes
+// ConfigMap) owns the flag.
+func TestLoadEnforcementLockedWhenEnvVarIsSet(t *testing.T) {
+	if config.Load().EnforcementLocked {
+		t.Fatal("an unset ENFORCEMENT_ENABLED must not lock enforcement")
+	}
+	for _, raw := range []string{"true", "false", "", "garbage"} {
+		t.Setenv("ENFORCEMENT_ENABLED", raw)
+		if !config.Load().EnforcementLocked {
+			t.Fatalf("ENFORCEMENT_ENABLED=%q must lock enforcement", raw)
+		}
+	}
+}
+
+// ENFORCEMENT_LOCK is the explicit override. false unlocks the flag even
+// though ENFORCEMENT_ENABLED is present; true locks it even when
+// ENFORCEMENT_ENABLED is absent.
+func TestLoadEnforcementLockOverride(t *testing.T) {
+	t.Setenv("ENFORCEMENT_ENABLED", "true")
+	t.Setenv("ENFORCEMENT_LOCK", "false")
+	if config.Load().EnforcementLocked {
+		t.Fatal("ENFORCEMENT_LOCK=false must unlock runtime toggles")
+	}
+
+	t.Setenv("ENFORCEMENT_ENABLED", "")
+	os.Unsetenv("ENFORCEMENT_ENABLED")
+	t.Setenv("ENFORCEMENT_LOCK", "true")
+	if !config.Load().EnforcementLocked {
+		t.Fatal("ENFORCEMENT_LOCK=true must lock even without ENFORCEMENT_ENABLED")
+	}
+}
+
+// An unparseable ENFORCEMENT_LOCK must keep the lock: a typo must not
+// silently unlock a ConfigMap-owned setting.
+func TestLoadEnforcementLockInvalidKeepsLock(t *testing.T) {
+	t.Setenv("ENFORCEMENT_ENABLED", "true")
+	t.Setenv("ENFORCEMENT_LOCK", "flase")
+	if !config.Load().EnforcementLocked {
+		t.Fatal("an invalid ENFORCEMENT_LOCK must not unlock enforcement")
+	}
+}
+
+func TestLoadAdminSocket(t *testing.T) {
+	if got := config.Load().AdminSocket; got != "/var/run/threat-engine/admin.sock" {
+		t.Fatalf("default AdminSocket = %q", got)
+	}
+	t.Setenv("ADMIN_SOCKET", "/tmp/te/admin.sock")
+	if got := config.Load().AdminSocket; got != "/tmp/te/admin.sock" {
+		t.Fatalf("AdminSocket = %q, want /tmp/te/admin.sock", got)
+	}
+}
+
 func TestLoadAdminPort(t *testing.T) {
 	if got := config.Load().AdminPort; got != "9091" {
 		t.Fatalf("default AdminPort = %q, want 9091", got)
@@ -100,6 +154,37 @@ func TestLoadAdminPort(t *testing.T) {
 	t.Setenv("ADMIN_PORT", "9191")
 	if got := config.Load().AdminPort; got != "9191" {
 		t.Fatalf("AdminPort = %q, want 9191", got)
+	}
+}
+
+func TestLoadCounterIntervalDefaultsToTenSeconds(t *testing.T) {
+	if got := config.Load().CounterInterval; got != 10*time.Second {
+		t.Fatalf("default CounterInterval = %v, want 10s", got)
+	}
+}
+
+func TestLoadCounterIntervalOverride(t *testing.T) {
+	t.Setenv("COUNTER_INTERVAL_SECONDS", "45")
+	if got := config.Load().CounterInterval; got != 45*time.Second {
+		t.Fatalf("CounterInterval = %v, want 45s", got)
+	}
+}
+
+// The poll interval is floored at one second: a tighter value would only
+// hammer the kernel with iptables calls.
+func TestLoadCounterIntervalIsFloored(t *testing.T) {
+	for _, raw := range []string{"0", "-5"} {
+		t.Setenv("COUNTER_INTERVAL_SECONDS", raw)
+		if got := config.Load().CounterInterval; got != time.Second {
+			t.Fatalf("COUNTER_INTERVAL_SECONDS=%q gave %v, want the 1s floor", raw, got)
+		}
+	}
+}
+
+func TestLoadCounterIntervalInvalidFallsBack(t *testing.T) {
+	t.Setenv("COUNTER_INTERVAL_SECONDS", "abc")
+	if got := config.Load().CounterInterval; got != 10*time.Second {
+		t.Fatalf("invalid interval gave %v, want the 10s default", got)
 	}
 }
 

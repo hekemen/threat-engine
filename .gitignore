@@ -1,4 +1,6 @@
-threat-engine
+# Compiled binary at the repository root. Anchored with a leading slash so it
+# does not also hide deploy/helm/threat-engine/ and any new files in it.
+/threat-engine
 
 # Coding agent resources (runtime artifacts)
 .superpowers/

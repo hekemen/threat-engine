@@ -177,6 +177,62 @@ func TestShutdownToleratesKernelFailure(t *testing.T) {
 	}
 }
 
+// A locked controller must refuse every runtime toggle: the flag is owned by
+// the environment (e.g. a Kubernetes ConfigMap), not by the operator at the
+// keyboard.
+func TestLockedControllerRefusesSet(t *testing.T) {
+	rec := &recorder{}
+	e := &iptables.Enforcer{HostileSetName: "h", WhitelistSetName: "w", Exec: rec.exec}
+	c := enforcement.NewLocked(e, false)
+
+	if !c.Locked() {
+		t.Fatal("NewLocked must report Locked()")
+	}
+	if err := c.Set(true); !errors.Is(err, enforcement.ErrLocked) {
+		t.Fatalf("Set on a locked controller = %v, want ErrLocked", err)
+	}
+	if c.Enabled() {
+		t.Fatal("a refused Set must not change the flag")
+	}
+	if rec.joined() != "" {
+		t.Fatalf("a refused Set must not touch the kernel, got:\n%s", rec.joined())
+	}
+}
+
+// SetAndReconcile on a locked controller must fail before any kernel work:
+// reconciling an unchanged flag would still be harmless, but failing early
+// keeps the "no kernel work on a refused toggle" guarantee simple.
+func TestLockedControllerRefusesSetAndReconcile(t *testing.T) {
+	rec := &recorder{}
+	e := &iptables.Enforcer{HostileSetName: "h", WhitelistSetName: "w", Exec: rec.exec}
+	c := enforcement.NewLocked(e, false)
+
+	if err := c.SetAndReconcile(context.Background(), true); !errors.Is(err, enforcement.ErrLocked) {
+		t.Fatalf("SetAndReconcile on a locked controller = %v, want ErrLocked", err)
+	}
+	if c.Enabled() {
+		t.Fatal("a refused SetAndReconcile must not change the flag")
+	}
+	if got := rec.joined(); strings.Contains(got, "-A THREAD_ENGINE_FILTER") {
+		t.Fatalf("a refused toggle must not install a DROP rule, got:\n%s", got)
+	}
+}
+
+// The locked controller still reconciles its own (env-driven) state, so a
+// ConfigMap-set ENFORCEMENT_ENABLED=true is honoured on every scan.
+func TestLockedControllerStillReconciles(t *testing.T) {
+	rec := &recorder{}
+	e := &iptables.Enforcer{HostileSetName: "h", WhitelistSetName: "w", Exec: rec.exec}
+	c := enforcement.NewLocked(e, true)
+
+	if err := c.Reconcile(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(rec.joined(), "-A THREAD_ENGINE_FILTER -m set --match-set h src -j DROP") {
+		t.Fatalf("a locked-but-enabled controller must still attach, got:\n%s", rec.joined())
+	}
+}
+
 func TestEnabledIsRaceFree(t *testing.T) {
 	c, _ := newController(false)
 	var wg sync.WaitGroup

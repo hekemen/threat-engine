@@ -3,6 +3,8 @@ services:
     build: .
     container_name: threat-engine
     restart: unless-stopped
+    # Required: the daemon edits the host's netfilter tables and refuses to
+    # start when it is not in the host's network namespace.
     network_mode: host
     cap_add:
       - NET_ADMIN
@@ -10,7 +12,17 @@ services:
     environment:
       - INTERVAL_MINUTES=5
       - HTTP_PORT=9090
+      # The admin unix socket. Mounted onto the host so `threat-engine enforce`
+      # can be run from the host as well as from inside the container.
+      - ADMIN_SOCKET=/var/run/threat-engine/admin.sock
+      # Set ENFORCEMENT_ENABLED to make the environment own the flag: the
+      # admin socket then refuses runtime toggles (HTTP 403). Leave it unset
+      # to keep the toggle available at runtime.
+      # - ENFORCEMENT_ENABLED=true
       - WHITELIST=198.51.100.42,203.0.113.0/24,100.64.0.0/10 # Static IP, VPN subnet, Tailscale
+    volumes:
+      # The admin socket lives here. The hostPath is created automatically.
+      - /var/run/threat-engine:/var/run/threat-engine
     logging:
       driver: "json-file"
       options:

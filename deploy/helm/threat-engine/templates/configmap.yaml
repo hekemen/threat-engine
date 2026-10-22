@@ -1,0 +1,14 @@
+{{- if .Values.admin.enforcementLocked }}
+{{/* A ConfigMap-owned enforcement flag: the operator edits this and restarts
+     the pods, and the daemon refuses runtime toggles because it sees
+     ENFORCEMENT_ENABLED in its environment. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.admin.enforcementConfigMap | default (printf "%s-enforcement" (include "threat-engine.fullname" .)) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "threat-engine.labels" . | nindent 4 }}
+data:
+  ENFORCEMENT_ENABLED: {{ .Values.enforcement.enabled | toString | quote }}
+{{- end }}

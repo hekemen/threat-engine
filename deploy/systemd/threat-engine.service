@@ -9,6 +9,12 @@ Type=simple
 ExecStart=/usr/local/bin/threat-engine
 EnvironmentFile=-/etc/threat-engine/threat-engine.env
 
+# The admin unix socket lives in a directory the service owns. RuntimeDirectory
+# creates it on start and removes it on stop, so a crashed daemon never leaves
+# a stale socket behind.
+RuntimeDirectory=threat-engine
+RuntimeDirectoryMode=0750
+
 # The daemon manipulates the host's netfilter tables, so it needs the two
 # network capabilities rather than a fully privileged service.
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW

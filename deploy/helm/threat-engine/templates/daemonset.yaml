@@ -50,8 +50,25 @@ spec:
                 - NET_ADMIN
                 - NET_RAW
           env:
+            {{- if .Values.admin.enforcementLocked }}
+            # Sourced from a ConfigMap so the operator owns the setting. The
+            # daemon sees ENFORCEMENT_ENABLED in its environment and therefore
+            # refuses runtime toggles on the admin socket (HTTP 403).
+            - name: ENFORCEMENT_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Values.admin.enforcementConfigMap | default (printf "%s-enforcement" (include "threat-engine.fullname" .)) }}
+                  key: ENFORCEMENT_ENABLED
+            - name: ENFORCEMENT_LOCK
+              value: "true"
+            {{- else }}
             - name: ENFORCEMENT_ENABLED
               value: {{ .Values.enforcement.enabled | toString | quote }}
+            # Explicitly unlocked: the env var sets the initial state, but the
+            # operator may still toggle enforcement at runtime.
+            - name: ENFORCEMENT_LOCK
+              value: "false"
+            {{- end }}
             - name: INTERVAL_MINUTES
               value: {{ .Values.scan.intervalMinutes | toString | quote }}
             - name: CONFIDENCE_THRESHOLD
@@ -60,6 +77,8 @@ spec:
               value: {{ .Values.http.port | toString | quote }}
             - name: ADMIN_PORT
               value: {{ .Values.admin.port | toString | quote }}
+            - name: ADMIN_SOCKET
+              value: {{ .Values.admin.socketPath | quote }}
             - name: HOSTILE_SET_NAME
               value: {{ .Values.sets.hostileName | quote }}
             - name: WHITELIST_SET_NAME
@@ -68,6 +87,9 @@ spec:
             - name: WHITELIST
               value: {{ join "," . | quote }}
             {{- end }}
+          volumeMounts:
+            - name: admin-socket
+              mountPath: {{ .Values.admin.socketDir }}
           ports:
             - name: http
               containerPort: {{ .Values.http.port }}
@@ -100,6 +122,18 @@ spec:
             failureThreshold: 3
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        # The admin unix socket. With a hostPath the socket is visible on the
+        # node, so `threat-engine enforce status` works from the host; without
+        # one it stays inside the pod and is reached with `kubectl exec`.
+        - name: admin-socket
+          {{- if .Values.admin.socketHostPath }}
+          hostPath:
+            path: {{ .Values.admin.socketHostPath }}
+            type: DirectoryOrCreate
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

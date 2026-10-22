@@ -11,7 +11,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
+	"github.com/rs/zerolog/log"
 	"net/netip"
 	"strings"
 
@@ -113,7 +113,7 @@ func (m *Manager) Destroy(ctx context.Context) error {
 	for _, name := range []string{m.HostileSetName, m.WhitelistSetName} {
 		out, err := m.Exec(ctx, nil, "ipset", "destroy", name)
 		if err != nil && !isAbsentSetError(out, err) {
-			log.Printf("[Cleanup] failed to destroy ipset %s: %v: %s", name, err, out)
+			log.Warn().Str("set", name).Err(err).Str("output", string(out)).Msg("Cleanup: failed to destroy ipset")
 			if firstErr == nil {
 				firstErr = fmt.Errorf("destroy %s: %v: %s", name, err, out)
 			}

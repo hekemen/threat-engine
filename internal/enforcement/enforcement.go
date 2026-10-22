@@ -15,10 +15,13 @@ package enforcement
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/hekemen/threat-engine/internal/iptables"
 )
+
+var ErrLocked = errors.New("enforcement is locked by environment variable")
 
 // Controller holds the enforcement flag and applies it to the kernel.
 type Controller struct {
@@ -26,12 +29,19 @@ type Controller struct {
 
 	mu      sync.RWMutex
 	enabled bool
+	locked  bool
 }
 
 // New returns a controller in the given initial state. It performs no kernel
 // work; the first Reconcile applies the state.
 func New(enforcer *iptables.Enforcer, enabled bool) *Controller {
 	return &Controller{Enforcer: enforcer, enabled: enabled}
+}
+
+// NewLocked returns a controller locked by environment configuration.
+// Runtime toggles are rejected while locked.
+func NewLocked(enforcer *iptables.Enforcer, enabled bool) *Controller {
+	return &Controller{Enforcer: enforcer, enabled: enabled, locked: true}
 }
 
 // Enabled reports whether enforcement is currently on.
@@ -41,12 +51,23 @@ func (c *Controller) Enabled() bool {
 	return c.enabled
 }
 
+// Locked reports whether enforcement changes are disallowed.
+func (c *Controller) Locked() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.locked
+}
+
 // Set updates the flag without touching the kernel. Pair it with Reconcile
 // (or use SetAndReconcile) to make the change take effect.
-func (c *Controller) Set(enabled bool) {
+func (c *Controller) Set(enabled bool) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.locked {
+		return ErrLocked
+	}
 	c.enabled = enabled
-	c.mu.Unlock()
+	return nil
 }
 
 // Reconcile applies the current flag to the kernel. It is idempotent and is
@@ -69,7 +90,9 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 // SetAndReconcile flips the flag and applies it in one call, so a toggle takes
 // effect within one round-trip rather than at the next scan tick.
 func (c *Controller) SetAndReconcile(ctx context.Context, enabled bool) error {
-	c.Set(enabled)
+	if err := c.Set(enabled); err != nil {
+		return err
+	}
 	return c.Reconcile(ctx)
 }
 
@@ -81,6 +104,8 @@ func (c *Controller) SetAndReconcile(ctx context.Context, enabled bool) error {
 // This exists because a bare `return` on SIGTERM left the chain attached with
 // a stale blocklist, still dropping packets long after the daemon was gone.
 func (c *Controller) Shutdown(ctx context.Context) error {
-	c.Set(false)
+	c.mu.Lock()
+	c.enabled = false
+	c.mu.Unlock()
 	return c.Reconcile(ctx)
 }

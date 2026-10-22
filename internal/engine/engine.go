@@ -7,7 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"log"
+	"github.com/rs/zerolog/log"
 	"net/http"
 	"net/netip"
 	"sort"
@@ -66,10 +66,10 @@ func (e *Engine) Aggregate(ctx context.Context) ([]string, error) {
 			defer wg.Done()
 			entries, err := a.Fetch(ctx, e.HTTPClient)
 			if err != nil {
-				log.Printf("[%s Adapter] Fetch failed: %v", a.Name(), err)
+				log.Warn().Str("adapter", a.Name()).Err(err).Msg("Adapter fetch failed")
 				return
 			}
-			log.Printf("[%s Adapter] Retrieved %d candidate entries", a.Name(), len(entries))
+			log.Info().Str("adapter", a.Name()).Int("entries", len(entries)).Msg("Adapter retrieved candidate entries")
 			resultsChan <- entries
 		}(adapter)
 	}
@@ -119,7 +119,7 @@ func (e *Engine) Aggregate(ctx context.Context) ([]string, error) {
 		}
 	}
 	if skippedIPv6 > 0 {
-		log.Printf("[Scanner] Ignored %d IPv6 target(s): enforcement is IPv4-only", skippedIPv6)
+		log.Info().Int("count", skippedIPv6).Msg("Scanner: ignored IPv6 targets (enforcement is IPv4-only)")
 	}
 
 	sorted := make([]string, 0, len(uniqueEntries))
@@ -146,11 +146,11 @@ func Fingerprint(entries []string) string {
 // both kernel steps succeed, so a partial failure leaves the previous
 // fingerprint in place and the next tick retries.
 func (e *Engine) ScanAndReconcile(ctx context.Context) {
-	log.Printf("[Scanner] Starting feed poll across %d adapters...", len(e.Adapters))
+	log.Info().Int("adapters", len(e.Adapters)).Msg("Scanner: starting feed poll")
 
 	entries, err := e.Aggregate(ctx)
 	if err != nil {
-		log.Printf("[Scanner Error] Aggregation encountered issues: %v", err)
+		log.Error().Err(err).Msg("Scanner aggregation encountered issues")
 		e.Metrics.RecordScanFailure()
 		return
 	}
@@ -168,7 +168,7 @@ func (e *Engine) ScanAndReconcile(ctx context.Context) {
 	// error if the sets are still missing.
 	if !e.setsEnsured {
 		if err := e.IPSet.EnsureSets(ctx); err != nil {
-			log.Printf("[Kernel Error] could not ensure ipset tables exist: %v", err)
+			log.Error().Err(err).Msg("Kernel error: could not ensure ipset tables exist")
 		} else {
 			e.setsEnsured = true
 		}
@@ -180,26 +180,26 @@ func (e *Engine) ScanAndReconcile(ctx context.Context) {
 	// feed itself changed.
 	e.logEnforcementTransition()
 	if err := e.Enforcement.Reconcile(ctx); err != nil {
-		log.Printf("[Kernel Error] enforcement reconcile failed: %v", err)
+		log.Error().Err(err).Msg("Kernel error: enforcement reconcile failed")
 		return
 	}
 
 	// Change Detection Guard
 	if fingerprint == e.Metrics.Fingerprint() {
-		log.Printf("[Scanner] SHA-256 fingerprint matches (%s). Zero changes detected; skipping kernel update.", fingerprint[:12])
+		log.Info().Str("fingerprint", fingerprint[:12]).Msg("Scanner: fingerprint matches, skipping kernel update")
 		return
 	}
 
-	log.Printf("[Scanner] Change detected! New fingerprint: %s. Reconciling %d unique targets...", fingerprint[:12], len(entries))
+	log.Info().Str("fingerprint", fingerprint[:12]).Int("targets", len(entries)).Msg("Scanner: change detected, reconciling targets")
 
 	if err := e.IPSet.Sync(ctx, entries); err != nil {
-		log.Printf("[Kernel Error] ipset swap failure: %v", err)
+		log.Error().Err(err).Msg("Kernel error: ipset swap failure")
 		return
 	}
 
 	e.Metrics.RecordUpdate(fingerprint, len(entries))
 
-	log.Printf("[Scanner Complete] Successfully applied updated rules. Blocklist entries: %d", len(entries))
+	log.Info().Int("entries", len(entries)).Msg("Scanner complete: successfully applied updated rules")
 }
 
 // logEnforcementTransition prints a prominent line whenever the desired
@@ -211,9 +211,9 @@ func (e *Engine) logEnforcementTransition() {
 		return
 	}
 	if enabled {
-		log.Printf("[Enforcement] ENABLED — hostile DROP rules are now active")
+		log.Info().Msg("Enforcement: ENABLED — hostile DROP rules are now active")
 	} else {
-		log.Printf("[Enforcement] DISABLED — kernel rules removed, packets are no longer filtered")
+		log.Info().Msg("Enforcement: DISABLED — kernel rules removed, packets are no longer filtered")
 	}
 	e.lastEnforcement = &enabled
 }

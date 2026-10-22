@@ -194,7 +194,7 @@ func TestScanAndReconcileSkipsKernelOnUnchangedFingerprint(t *testing.T) {
 	entries := []string{"1.2.3.4", "5.6.7.0/24"}
 	var calls []kernelCall
 	m := metrics.New()
-	e := newEngine(m, entries, countingExec(&calls, nil))
+	e := newEngine(m, entries, countingExecWithKernel(&calls, nil))
 	e.ScanAndReconcile(context.Background()) // first scan: applies
 
 	// Enforcement is disabled in newEngine. The disabled reconcile runs its
@@ -238,7 +238,7 @@ func TestScanAndReconcileSkipsKernelOnUnchangedFingerprint(t *testing.T) {
 func TestScanPopulatesIpsetsButSkipsIptablesWhenDisabled(t *testing.T) {
 	var calls []kernelCall
 	m := metrics.New()
-	exec := countingExec(&calls, nil)
+	exec := countingExecWithKernel(&calls, nil)
 	e := newEngine(m, []string{"1.2.3.4"}, exec) // newEngine constructs the controller with enforcement disabled
 	e.ScanAndReconcile(context.Background())
 
@@ -396,7 +396,7 @@ func TestScanEnsuresSetsOnlyOnce(t *testing.T) {
 
 func TestScanAndReconcileRecordsUpdateOnChange(t *testing.T) {
 	m := metrics.New()
-	e := newEngine(m, []string{"1.2.3.4"}, countingExec(&[]kernelCall{}, nil))
+	e := newEngine(m, []string{"1.2.3.4"}, countingExecWithKernel(&[]kernelCall{}, nil))
 	e.ScanAndReconcile(context.Background())
 	if m.Snapshot().UpdatesAppliedTotal != 1 || m.Snapshot().BlockedIPsCount != 1 {
 		t.Fatalf("unexpected snapshot: %+v", m.Snapshot())

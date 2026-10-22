@@ -25,21 +25,73 @@ That makes it safe to deploy, observe against production traffic, and only then
 switch on. Enforcement is enabled two ways:
 
 1. **At startup**, with `ENFORCEMENT_ENABLED=true`.
-2. **At runtime**, by POSTing to a loopback-only admin endpoint:
+2. **At runtime**, over the admin surface:
 
    ```bash
+   # The CLI (unix socket, preferred)
+   threat-engine enforce status
+   threat-engine enforce on
+   threat-engine enforce off
+
+   # The loopback-only TCP admin listener (same handler)
    curl -s 'http://127.0.0.1:9091/enforcement'                       # read state
    curl -s -X POST 'http://127.0.0.1:9091/enforcement?enabled=true'  # attach rules
    curl -s -X POST 'http://127.0.0.1:9091/enforcement?enabled=false' # detach rules
    ```
 
    The toggle attaches or detaches the chain synchronously — no restart, no wait
-   for the next scan.
+   for the next scan. `enforce off` removes **every** `raw:PREROUTING` jump into
+   the chain, not just the first one, and verifies the teardown against the
+   kernel; if the chain would still be reachable, the command fails with an
+   error instead of reporting a detach that did not happen.
 
 The admin listener binds `127.0.0.1` only. It is reachable from the host (or
 from inside the container/pod with `kubectl exec` / `kubectl port-forward`), and
 never from another machine or another pod. **Note that this also means any
 process on the node can toggle enforcement**; see [Security model](#security-model).
+
+#### Admin unix socket
+
+The daemon also serves the same `/enforcement` handler on a unix domain socket
+(default `/var/run/threat-engine/admin.sock`). It is the preferred control
+surface: it needs no port, it survives being exposed through a `Service`, and it
+can be restricted with filesystem permissions.
+
+```bash
+threat-engine enforce status                  # uses the default socket path
+THREAT_ENGINE_ADMIN_SOCKET=/run/te/admin.sock threat-engine enforce off
+```
+
+In Kubernetes, mount a `hostPath` directory so the socket is reachable from the
+node as well as the pod:
+
+```bash
+kubectl exec -n <ns> daemonset/threat-engine -- threat-engine enforce on
+```
+
+#### Locking enforcement to the environment
+
+If `ENFORCEMENT_ENABLED` is present in the environment, the environment owns the
+flag: the admin socket and the TCP admin listener then **refuse runtime
+toggles** (`403 {"error":"enforcement is locked by environment variable"}`),
+while `GET /enforcement` keeps reporting the current state. This is the
+Kubernetes pattern — a ConfigMap-bound env var that nobody can override at
+runtime:
+
+```yaml
+env:
+  - name: ENFORCEMENT_ENABLED
+    valueFrom:
+      configMapKeyRef:
+        name: threat-engine-enforcement
+        key: ENFORCEMENT_ENABLED
+```
+
+Set `ENFORCEMENT_LOCK=false` to use the env var as the *initial* state only,
+keeping the runtime toggle available. An unparseable `ENFORCEMENT_LOCK` keeps
+the lock, so a typo cannot silently unlock a ConfigMap-owned setting.
+
+The Helm chart does this with `admin.enforcementLocked=true`.
 
 The enforcement state is reconciled declaratively on **every** scan. If someone
 turns enforcement off, it stays off — a later scan cannot silently re-enable it,
@@ -63,6 +115,48 @@ sudo ipset list threat_engine_hostile_ips -terse
 sudo iptables -t raw -S | grep THREAD_ENGINE_FILTER
 sudo iptables -t raw -L THREAD_ENGINE_FILTER -v -n   # whitelist RETURN before hostile DROP
 ```
+
+### Testing that the rules really filter
+
+The tables and the rules can both look perfect while nothing is filtered. To
+prove the filtering end to end, send real packets through the node's
+`PREROUTING` path and watch what happens:
+
+```bash
+sudo ./tests/iptables-e2e.sh          # on the node, as root
+```
+
+It reports six checks: exactly one `PREROUTING` jump, the whitelist `RETURN`
+before the hostile `DROP`, a hostile source getting no reply, the `DROP` rule
+counting it, the same source whitelisted getting a reply, and the `RETURN`
+rule counting it.
+
+The trick is the source address. A `--match-set ... src` rule only sees
+packets that **arrive** at the node, and locally generated traffic leaves
+through `OUTPUT` — so `ping <node>` from the node itself proves nothing. The
+script assigns a test address to `lo` and sends from it, so the packet is
+looped back through the ingress path with that address as its source.
+
+Two details it handles for you:
+
+- The source must not already be covered by a feed entry. Several feeds list
+  `192.0.2.0/24`, `198.51.100.0/24`, `198.18.0.0/15` or `203.0.112.0/23`, so
+  an address from a "documentation" range can be hostile before the script
+  touches anything. It picks a candidate that `ipset test` reports as being in
+  neither set, and you can override it with `--src`.
+- The destination must not be hostile, or the **reply** is dropped too and a
+  whitelisted request still looks like a loss. The script uses the node's own
+  primary address and refuses to continue if that address is blocked.
+
+In Kubernetes the daemon shares the node's network namespace, so the same
+script runs inside the pod:
+
+```bash
+kubectl exec -i -n <ns> daemonset/threat-engine -- sh < tests/iptables-e2e.sh
+```
+
+It needs the chain attached (enforcement on), and it cleans up the addresses
+and set entries it added.
 
 ### Stopping the daemon
 
@@ -108,6 +202,15 @@ modules must also be loaded:
 sudo modprobe ip_set ip_set_hash_net xt_set
 ```
 
+**Run only one deployment per host.** Every path below edits the *same* host
+kernel state: the same `ipset` tables (`threat_engine_hostile_ips`,
+`threat_engine_whitelist_ips`), the same `raw:PREROUTING` chain
+(`THREAD_ENGINE_FILTER`), and the same ports (`9090`, `9091`) — because all of
+them use host networking. A second daemon on the same node does not fail
+cleanly: it crash-loops with `listen tcp :9090: bind: address already in use`,
+while the two of them overwrite each other's ipset contents and fight over the
+same chain on every scan. Pick one path per node.
+
 ### 1. Direct binary
 
 ```bash
@@ -151,6 +254,7 @@ docker run -d \
   -e INTERVAL_MINUTES=5 \
   -e ENFORCEMENT_ENABLED=false \
   -e WHITELIST="203.0.113.10" \
+  -v /var/run/threat-engine:/var/run/threat-engine \
   threat-engine:local
 ```
 
@@ -161,7 +265,23 @@ docker compose up -d
 ```
 
 `--net=host` is required: the daemon must edit the **host's** netfilter tables,
-not a container-local namespace.
+not a container-local namespace. In `docker-compose.yaml` that means
+`network_mode: host`; in Kubernetes it means `hostNetwork: true`. The daemon
+**verifies** this at startup and exits non-zero if it is not in the host's
+network namespace, so a container that silently filters nothing cannot come up
+looking healthy.
+
+The `/var/run/threat-engine` volume carries the admin unix socket, so the
+toggle works from the host as well as from inside the container:
+
+```bash
+docker exec threat-engine enforce status     # `enforce` is an alias in the image
+threat-engine enforce on        # from the host, with the socket mounted
+```
+
+The image installs the binary under two names: `threat-engine` and `enforce`.
+The alias exists so the container command reads as one word; both forms are
+equivalent.
 
 ### 3. Kubernetes / Helm
 
@@ -173,9 +293,25 @@ helm install threat-engine ./deploy/helm/threat-engine
 helm install threat-engine ./deploy/helm/threat-engine --set enforcement.enabled=true
 ```
 
+To make a ConfigMap own the setting — no runtime toggle, nobody can flip the
+firewall behind the operator's back:
+
+```bash
+helm install threat-engine ./deploy/helm/threat-engine \
+  --set enforcement.enabled=true \
+  --set admin.enforcementLocked=true
+```
+
 The chart sets `hostNetwork: true`, `dnsPolicy: ClusterFirstWithHostNet`, and the
 two capabilities. See its [README](deploy/helm/threat-engine/README.md) for the
 full value list and the runtime toggle instructions.
+
+To check that a running release is healthy — pods ready, kernel tables
+populated, no stray chain, and the access-control boundaries intact:
+
+```bash
+deploy/helm/threat-engine/verify.sh --toggle
+```
 
 ### 4. systemd
 
@@ -199,8 +335,11 @@ All settings are environment variables.
 | :--- | :--- | :--- |
 | `ENFORCEMENT_ENABLED` | `false` | Attach the hostile DROP rules to `raw:PREROUTING`. Accepts `true/1/yes` and `false/0/no`; **anything unparseable falls back to `false`**, so a typo cannot enable enforcement. |
 | `INTERVAL_MINUTES` | `5` | Feed polling frequency. |
+| `COUNTER_INTERVAL_SECONDS` | `10` | How often the daemon samples the kernel's per-rule drop counters (floor `1`). The `/metrics` counters are computed in memory; scraping `/metrics` never shells out. |
 | `HTTP_PORT` | `9090` | Read-only listener for `/healthz`, `/check`, `/metrics`. |
 | `ADMIN_PORT` | `9091` | Loopback-only (`127.0.0.1`) toggle listener. |
+| `ADMIN_SOCKET` | `/var/run/threat-engine/admin.sock` | Unix domain socket serving the same toggle handler. Preferred control surface; set to an empty value to disable it. |
+| `ENFORCEMENT_LOCK` | *(unset)* | Explicitly lock (`true`) or unlock (`false`) runtime enforcement changes. Unset means: locked whenever `ENFORCEMENT_ENABLED` is present in the environment. |
 | `HOSTILE_SET_NAME` | `threat_engine_hostile_ips` | Kernel `ipset` name for blocked IPs/CIDRs. |
 | `WHITELIST_SET_NAME` | `threat_engine_whitelist_ips` | Kernel `ipset` name for allowed IPs/CIDRs. |
 | `WHITELIST` | `""` | Comma-separated extra IPs/CIDRs to never block, e.g. `203.0.113.10,198.51.100.0/24`. |
@@ -250,14 +389,23 @@ Read-only. The admin path deliberately does **not** exist here (it returns 404).
 | Endpoint | Description |
 | :--- | :--- |
 | `GET /enforcement` | Current enforcement state as JSON. |
-| `POST /enforcement?enabled=true\|false` | Apply immediately and return the new state. `400` on an unparseable value, `405` on other methods, `500` if the kernel call fails. |
+| `POST /enforcement?enabled=true\|false` | Apply immediately and return the new state. `400` on an unparseable value, `403` when enforcement is locked by the environment, `405` on other methods, `500` if the kernel call fails. |
+
+The identical handler is served on the admin unix socket (`ADMIN_SOCKET`). The
+public listener returns `404` for `/enforcement` in both cases.
 
 ## Metrics
 
 | Metric | Type | Description |
 | :--- | :--- | :--- |
-| `threat_engine_blocked_targets_total` | gauge | Active IPs/subnets in the drop set. |
-| `threat_engine_whitelist_entries_total` | gauge | Subnets in the whitelist. |
+| `threat_engine_blocked_targets` | gauge | Active IPs/subnets in the drop set. |
+| `threat_engine_blocked_targets_total` | gauge | **Deprecated:** use `threat_engine_blocked_targets`. |
+| `threat_engine_whitelist_entries` | gauge | Subnets in the whitelist. |
+| `threat_engine_whitelist_entries_total` | gauge | **Deprecated:** use `threat_engine_whitelist_entries`. |
+| `threat_engine_dropped_packets_total` | counter | Packets dropped by the kernel for hostile sources (monotonic; survives chain rebuilds). |
+| `threat_engine_dropped_bytes_total` | counter | Bytes dropped by the kernel for hostile sources (monotonic). |
+| `threat_engine_whitelist_bypassed_packets_total` | counter | Packets that matched the whitelist and returned early. |
+| `threat_engine_whitelist_bypassed_bytes_total` | counter | Bytes that matched the whitelist and returned early. |
 | `threat_engine_enforcement_enabled` | gauge | `1` when the DROP rules are attached, `0` when inert. |
 | `threat_engine_scans_total{status="success\|failure"}` | counter | Scan executions. |
 | `threat_engine_updates_applied_total` | counter | Times a change triggered a kernel swap. |
@@ -269,6 +417,17 @@ fails to reach the kernel returns HTTP 500 and the metric still reflects the
 requested state until the next scan retries — treat a 500 as a failure and
 re-read the metric after the following scan interval.
 
+The drop counters are sampled by reading `iptables -t raw -L THREAD_ENGINE_FILTER -v -n -x` on
+a separate schedule (`COUNTER_INTERVAL_SECONDS`). The kernel resets a rule's
+counters whenever the chain is rebuilt, so the daemon accumulates deltas and
+treats a decrease as a reset. The counters remain monotonic, and `/metrics` is a
+pure in-memory read with no `exec` on the scrape path. In rare cases a reset
+followed by enough drops to exceed the previous total can be undercounted, but
+the total stays monotonic and Prometheus rate functions behave correctly across
+resets. Because of this sampling, the counters are "since the daemon started
+observing" rather than a perfect global kernel total across non-graceful restarts
+where the chain survives.
+
 ## Security model
 
 - **Failure to enable is fail-safe.** An unset, empty, or misspelled
@@ -277,9 +436,13 @@ re-read the metric after the following scan interval.
   loopback. There is no bearer token. Any process on the node (or anything that
   can reach the pod's network namespace) can disable the firewall. If that is
   not an acceptable trust boundary for your host, front it with a token or an
-  authorization proxy, or leave `ENFORCEMENT_ENABLED` controlled solely by the
-  startup environment variable and treat the runtime toggle as a break-glass
-  tool.
+  authorization proxy, restrict the unix socket with filesystem permissions, or
+  leave `ENFORCEMENT_ENABLED` controlled solely by the startup environment
+  variable — which locks the runtime toggle entirely — and treat the toggle as a
+  break-glass tool.
+- **The startup environment variable owns the flag.** When `ENFORCEMENT_ENABLED`
+  is present in the environment, runtime toggles are refused with `403`. This is
+  the way to make a ConfigMap the single source of truth.
 - **Whitelist filtering is never optional.** Private and link-local ranges are
   excluded during parsing and enforced with an explicit `RETURN` rule at the top
   of the chain. Nothing may put RFC 1918 space into the hostile set — that would
@@ -287,6 +450,41 @@ re-read the metric after the following scan interval.
 - **Updates are atomic.** The daemon populates a `<set>_tmp` buffer and calls
   `ipset swap`; it never flushes a live set, so there is no window where the
   blocklist is empty or the kernel locks.
+
+## Startup validation
+
+The daemon checks its environment **before** it starts serving. It fails fast,
+with a clear message, when:
+
+| Check | Failure message |
+| :--- | :--- |
+| The process is not in the host's network namespace | `Not sharing the host network namespace (net:[…], expected the initial namespace net:[4026531833])…` |
+| `ipset` is not in `PATH` | `Required binary "ipset" not found in PATH` |
+| `iptables` is not in `PATH` | `Required binary "iptables" not found in PATH` |
+| `ipset`/`iptables` cannot reach the kernel (missing capability) | `Cannot run ipset: permission denied. The daemon requires CAP_NET_ADMIN (docker: --cap-add=NET_ADMIN) and CAP_NET_RAW (docker: --cap-add=NET_RAW), and host networking (docker-compose: network_mode: host, docker run: --net=host).` |
+| `ipset` cannot reach the kernel | `Cannot access ipset: permission denied…` / `netfilter modules missing…` |
+| `iptables` cannot read the `raw` table | `Cannot access iptables: permission denied…` |
+
+Each of these is logged as `Startup validation failed` with the detail in the
+`error` field, and the process exits non-zero.
+
+The `ipset` check probes the kernel by listing a set that does not exist
+(`threat_engine_probe_nonexistent`). That failure is the success signal — it
+proves ipset reached the kernel — so it is reported as
+`KernelCheck: ipset reachable (probe set absent, as expected)` and never as an
+error.
+
+Some `ipset` builds probe the kernel even for `--version`, so a version check
+that fails with `Operation not permitted` is a missing capability, not a broken
+binary. The daemon reports it as such and names the capabilities to grant
+instead of blaming the version.
+
+This is deliberate: a daemon that starts cleanly but cannot write the kernel
+tables looks healthy while filtering nothing. Failing at startup turns a silent
+no-op into a visible `CrashLoopBackOff`.
+
+The checks need root-equivalent network administration (`CAP_NET_ADMIN` and
+`CAP_NET_RAW`) and host networking — see the deployment sections above.
 
 ## Troubleshooting
 

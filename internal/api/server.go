@@ -6,10 +6,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log"
+	"github.com/rs/zerolog/log"
+	"net"
 	"net/http"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -28,6 +32,10 @@ type Server struct {
 	Enforcement *enforcement.Controller
 	// AdminPort is the loopback-only admin listener's port.
 	AdminPort string
+	// AdminSocket is the unix domain socket path for admin control.
+	AdminSocket string
+	// EnforcementLocked prevents runtime changes when true.
+	EnforcementLocked bool
 }
 
 // enforcementEnabled reports the current enforcement state. A nil controller
@@ -69,6 +77,33 @@ func (s *Server) AdminHTTPServer() *http.Server {
 	return &http.Server{Addr: "127.0.0.1:" + s.AdminPort, Handler: s.AdminHandler()}
 }
 
+// AdminSocketServer listens on a unix domain socket for admin control.
+// On Linux, socket permissions can be used to restrict access.
+func (s *Server) AdminSocketServer() *http.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/enforcement", s.handleEnforcement)
+	return &http.Server{Handler: mux}
+}
+
+// ListenAdminSocket creates and listens on the admin unix socket.
+func (s *Server) ListenAdminSocket() (net.Listener, error) {
+	if s.AdminSocket == "" {
+		return nil, nil
+	}
+	if err := os.Remove(s.AdminSocket); err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(s.AdminSocket), 0755); err != nil {
+		return nil, err
+	}
+	ln, err := net.Listen("unix", s.AdminSocket)
+	if err != nil {
+		return nil, err
+	}
+	_ = os.Chmod(s.AdminSocket, 0660)
+	return ln, nil
+}
+
 // parseBoolArg accepts the same spellings as the ENFORCEMENT_ENABLED env var.
 func parseBoolArg(raw string) (bool, bool) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
@@ -92,6 +127,11 @@ func (s *Server) handleEnforcement(w http.ResponseWriter, r *http.Request) {
 			"enforcement_enabled": s.enforcementEnabled(),
 		})
 	case http.MethodPost:
+		if s.EnforcementLocked || (s.Enforcement != nil && s.Enforcement.Locked()) {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"enforcement is locked by environment variable"}`))
+			return
+		}
 		enabled, ok := parseBoolArg(r.URL.Query().Get("enabled"))
 		if !ok {
 			w.WriteHeader(http.StatusBadRequest)
@@ -99,19 +139,38 @@ func (s *Server) handleEnforcement(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if s.Enforcement == nil {
-			// A Server without a controller cannot change anything. Reporting
-			// success here would tell an operator their firewall changed when
-			// nothing happened, so refuse instead.
 			w.WriteHeader(http.StatusInternalServerError)
 			w.Write([]byte(`{"error":"enforcement is not configured on this server"}`))
 			return
 		}
+		// The chain's rules reference the kernel sets by name, and iptables
+		// refuses to install a `--match-set` rule while the set does not exist
+		// ("Set threat_engine_whitelist_ips doesn't exist"). The sets are
+		// normally created by the first scan, so an operator toggling
+		// enforcement before that scan finished would hit that error and end
+		// up with no rules at all.
+		//
+		// EnsureSets states the prerequisite explicitly. It is idempotent
+		// (`create ... -exist`) and never flushes or swaps, so a populated set
+		// survives untouched.
+		if enabled && s.IPSet != nil {
+			if err := s.IPSet.EnsureSets(r.Context()); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+				return
+			}
+		}
 		if err := s.Enforcement.SetAndReconcile(r.Context(), enabled); err != nil {
+			if errors.Is(err, enforcement.ErrLocked) {
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"error":"enforcement is locked by environment variable"}`))
+				return
+			}
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
 			return
 		}
-		log.Printf("[Enforcement] toggled via admin API: enabled=%v", enabled)
+		log.Info().Bool("enabled", enabled).Msg("Enforcement toggled via admin API")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"enforcement_enabled": s.enforcementEnabled(),
 		})
@@ -174,15 +233,30 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 
 // handleMetrics renders the Prometheus exposition format by hand; the daemon
 // carries no metrics dependency.
+//
+// The drop counters are read from memory: the scrape path never shells out,
+// so a scrape cannot block on the kernel.
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	snap := s.Metrics.Snapshot()
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	fmt.Fprintf(w, "# HELP threat_engine_blocked_targets_total Number of hostile IPs/CIDRs currently blocked in kernel\n")
+
+	fmt.Fprintf(w, "# HELP threat_engine_blocked_targets Number of hostile IPs/CIDRs currently blocked in kernel\n")
+	fmt.Fprintf(w, "# TYPE threat_engine_blocked_targets gauge\n")
+	fmt.Fprintf(w, "threat_engine_blocked_targets %d\n\n", snap.BlockedIPsCount)
+
+	// Deprecated aliases. The `_total` suffix is reserved for counters, so a
+	// gauge wearing it is a lint violation. The old names are kept for one
+	// release cycle so existing dashboards do not silently go blank.
+	fmt.Fprintf(w, "# HELP threat_engine_blocked_targets_total DEPRECATED: use threat_engine_blocked_targets instead. Number of hostile IPs/CIDRs currently blocked in kernel\n")
 	fmt.Fprintf(w, "# TYPE threat_engine_blocked_targets_total gauge\n")
 	fmt.Fprintf(w, "threat_engine_blocked_targets_total %d\n\n", snap.BlockedIPsCount)
 
-	fmt.Fprintf(w, "# HELP threat_engine_whitelist_entries_total Active whitelist subnets\n")
+	fmt.Fprintf(w, "# HELP threat_engine_whitelist_entries Active whitelist subnets\n")
+	fmt.Fprintf(w, "# TYPE threat_engine_whitelist_entries gauge\n")
+	fmt.Fprintf(w, "threat_engine_whitelist_entries %d\n\n", snap.WhitelistCount)
+
+	fmt.Fprintf(w, "# HELP threat_engine_whitelist_entries_total DEPRECATED: use threat_engine_whitelist_entries instead. Active whitelist subnets\n")
 	fmt.Fprintf(w, "# TYPE threat_engine_whitelist_entries_total gauge\n")
 	fmt.Fprintf(w, "threat_engine_whitelist_entries_total %d\n\n", snap.WhitelistCount)
 
@@ -194,6 +268,22 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "# HELP threat_engine_updates_applied_total Times a change triggered an ipset swap\n")
 	fmt.Fprintf(w, "# TYPE threat_engine_updates_applied_total counter\n")
 	fmt.Fprintf(w, "threat_engine_updates_applied_total %d\n\n", snap.UpdatesAppliedTotal)
+
+	fmt.Fprintf(w, "# HELP threat_engine_dropped_packets_total Packets dropped by the kernel for hostile sources\n")
+	fmt.Fprintf(w, "# TYPE threat_engine_dropped_packets_total counter\n")
+	fmt.Fprintf(w, "threat_engine_dropped_packets_total %d\n\n", snap.DroppedPacketsTotal)
+
+	fmt.Fprintf(w, "# HELP threat_engine_dropped_bytes_total Bytes dropped by the kernel for hostile sources\n")
+	fmt.Fprintf(w, "# TYPE threat_engine_dropped_bytes_total counter\n")
+	fmt.Fprintf(w, "threat_engine_dropped_bytes_total %d\n\n", snap.DroppedBytesTotal)
+
+	fmt.Fprintf(w, "# HELP threat_engine_whitelist_bypassed_packets_total Packets let through by the whitelist bypass\n")
+	fmt.Fprintf(w, "# TYPE threat_engine_whitelist_bypassed_packets_total counter\n")
+	fmt.Fprintf(w, "threat_engine_whitelist_bypassed_packets_total %d\n\n", snap.WhitelistBypassedPacketsTotal)
+
+	fmt.Fprintf(w, "# HELP threat_engine_whitelist_bypassed_bytes_total Bytes let through by the whitelist bypass\n")
+	fmt.Fprintf(w, "# TYPE threat_engine_whitelist_bypassed_bytes_total counter\n")
+	fmt.Fprintf(w, "threat_engine_whitelist_bypassed_bytes_total %d\n\n", snap.WhitelistBypassedBytesTotal)
 
 	fmt.Fprintf(w, "# HELP threat_engine_enforcement_enabled Whether hostile DROP rules are attached to PREROUTING (1) or inert (0)\n")
 	fmt.Fprintf(w, "# TYPE threat_engine_enforcement_enabled gauge\n")

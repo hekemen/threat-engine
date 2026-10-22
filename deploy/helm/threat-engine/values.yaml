@@ -35,6 +35,25 @@ http:
 # `kubectl port-forward` or `kubectl exec` to reach it.
 admin:
   port: 9091
+  # Path of the admin unix domain socket inside the container. The socket is
+  # the preferred control surface: it needs no port and can be restricted by
+  # filesystem permissions.
+  socketPath: /var/run/threat-engine/admin.sock
+  # Directory the socket is placed in. When `socketHostPath` is set, this
+  # directory is a hostPath volume, so the socket is reachable from the node
+  # itself (e.g. `threat-engine enforce status` run on the host).
+  socketDir: /var/run/threat-engine
+  # Optional hostPath directory backing socketDir. Leave empty to keep the
+  # socket inside the pod's filesystem only.
+  socketHostPath: ""
+  # Lock runtime enforcement changes. When true, ENFORCEMENT_ENABLED is
+  # sourced from a ConfigMap and the admin socket refuses toggles, so the
+  # operator changes enforcement by editing the ConfigMap and restarting the
+  # pods — nothing can flip the firewall behind their back.
+  enforcementLocked: false
+  # Name of the ConfigMap holding the ENFORCEMENT_ENABLED key. Created by this
+  # chart when empty.
+  enforcementConfigMap: ""
 
 image:
   repository: ghcr.io/hekemen/threat-engine
